@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+
+[vision]
+opencv-python
+mediapipe
+numpy
+scikit-learn

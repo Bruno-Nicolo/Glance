@@ -1,0 +1,13 @@
+{
+  "name": "glance",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:ui": "npm --workspace @glance/ui run dev",
+    "dev:core": "PYTHONPATH=core/src python3 -m glance_core",
+    "dev:helper": "swift run --package-path native/macos-helper GlanceHelper"
+  }
+}

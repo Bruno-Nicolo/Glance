@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: glance-core
+Version: 0.1.0
+Summary: Python orchestrator and gaze estimation core for Glance.
+Requires-Python: >=3.11
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: pydantic
+Provides-Extra: vision
+Requires-Dist: opencv-python; extra == "vision"
+Requires-Dist: mediapipe; extra == "vision"
+Requires-Dist: numpy; extra == "vision"
+Requires-Dist: scikit-learn; extra == "vision"

@@ -1,0 +1,11 @@
+pyproject.toml
+src/glance_core/__init__.py
+src/glance_core/__main__.py
+src/glance_core/paths.py
+src/glance_core/security.py
+src/glance_core/server.py
+src/glance_core.egg-info/PKG-INFO
+src/glance_core.egg-info/SOURCES.txt
+src/glance_core.egg-info/dependency_links.txt
+src/glance_core.egg-info/requires.txt
+src/glance_core.egg-info/top_level.txt
