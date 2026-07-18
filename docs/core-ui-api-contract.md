@@ -39,6 +39,18 @@ Returns UI dashboard state. `ui.runtime_critical` is always `false` in MVP 1.
   "helper": { "state": "running" },
   "camera": { "state": "stopped", "active": false },
   "tracking": { "state": "stopped", "input_enabled": false },
+  "gaze": {
+    "contract_version": 1,
+    "profile_id": null,
+    "status": "uncalibrated",
+    "confidence": 0.0,
+    "sample_at_ms": null,
+    "source": "synthetic",
+    "correction": "idw-3x3",
+    "smoothing_alpha": 0.5,
+    "confidence_threshold": 0.6,
+    "invalid_reason": "uncalibrated"
+  },
   "calibration": { "state": "missing", "profile_id": null },
   "ui": { "runtime_critical": false },
   "error": null
@@ -51,7 +63,14 @@ Allowed states:
 - `helper.state`: `not-started`, `running`, `exited`, `error`
 - `camera.state`: `stopped`, `starting`, `running`, `error`
 - `tracking.state`: `stopped`, `running`, `paused`, `error`
+- `gaze.status`: `valid`, `low-confidence`, `face-lost`, `uncalibrated`, `paused`
+- `gaze.source`: `synthetic`, `camera`
 - `calibration.state`: `missing`, `in-progress`, `valid`, `error`
+
+`gaze` is privacy-preserving debug/status telemetry for the mapper. It reports confidence,
+sample time, source, correction mode, smoothing alpha, threshold, and invalid reason, but never
+camera frames, raw landmarks, feature vectors, quality vectors, or gaze traces. See
+[Gaze Mapping and Confidence Contract](gaze-mapping-and-confidence-contract.md).
 
 ### `GET /settings`
 

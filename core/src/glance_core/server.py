@@ -31,6 +31,7 @@ from .helper_events import (
     TrackingStatusEvent,
     now_ms,
 )
+from .gaze_mapping_contract import GazeInvalidReason, GazeMappingDebug
 from .calibration_sessions import (
     CalibrationSessionError,
     CalibrationSessionRecord,
@@ -153,11 +154,33 @@ def create_app(
             )
 
     def current_status() -> CoreUiStatus:
+        synthetic_enabled = settings.debug.synthetic_gaze_enabled
+        calibrated = calibration_store.profile_id is not None
+        gaze_running = tracking_state == "running" and synthetic_enabled and calibrated
+        invalid_reason: GazeInvalidReason | None = None
+        if not synthetic_enabled:
+            invalid_reason = "synthetic-disabled"
+        elif not calibrated:
+            invalid_reason = "uncalibrated"
+        elif tracking_state != "running":
+            invalid_reason = "paused" if tracking_state == "paused" else "tracking-stopped"
+        gaze_status = "valid" if gaze_running else "uncalibrated" if invalid_reason == "uncalibrated" else "paused"
+
         return CoreUiStatus(
             pid=os.getpid() if state.runtime_path is None else None,
             helper_state=helper.status,
             tracking_state=tracking_state,
             input_enabled=tracking_state == "running" and settings.input.space_click_enabled,
+            gaze=GazeMappingDebug(
+                profile_id=calibration_store.profile_id,
+                status=gaze_status,
+                confidence=1.0 if gaze_running else 0.0,
+                sample_at_ms=now_ms() if gaze_running else None,
+                source="synthetic" if synthetic_enabled else "camera",
+                smoothing_alpha=settings.tracking.smoothing,
+                confidence_threshold=settings.tracking.confidence_threshold,
+                invalid_reason=invalid_reason,
+            ),
             calibration_state=calibration_store.state,
             calibration_profile_id=calibration_store.profile_id,
         )

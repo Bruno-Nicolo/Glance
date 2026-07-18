@@ -135,6 +135,18 @@ class CoreUiApiContractTests(unittest.TestCase):
                 "helper": {"state": "not-started"},
                 "camera": {"state": "stopped", "active": False},
                 "tracking": {"state": "stopped", "input_enabled": False},
+                "gaze": {
+                    "contract_version": 1,
+                    "profile_id": None,
+                    "status": "uncalibrated",
+                    "confidence": 0.0,
+                    "sample_at_ms": None,
+                    "source": "synthetic",
+                    "correction": "idw-3x3",
+                    "smoothing_alpha": 0.5,
+                    "confidence_threshold": 0.6,
+                    "invalid_reason": "uncalibrated",
+                },
                 "calibration": {"state": "missing", "profile_id": None},
                 "ui": {"runtime_critical": False},
                 "error": None,
@@ -161,6 +173,14 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(get_body["tracking"]["pause_behavior"], "privacy-low-power")
         self.assertEqual(get_body["tracking"]["confidence_threshold"], 0.74)
         self.assertEqual(get_body["input"]["space_click_enabled"], False)
+
+        _status_code, status_body = self.get("/status")
+        self.assertEqual(status_body["gaze"]["source"], "camera")
+        self.assertEqual(status_body["gaze"]["status"], "paused")
+        self.assertEqual(status_body["gaze"]["confidence"], 0.0)
+        self.assertEqual(status_body["gaze"]["confidence_threshold"], 0.74)
+        self.assertEqual(status_body["gaze"]["smoothing_alpha"], 0.38)
+        self.assertEqual(status_body["gaze"]["invalid_reason"], "synthetic-disabled")
 
     def test_settings_rejects_unknown_fields_with_structured_error(self) -> None:
         status_code, body = self.put("/settings", {"tracking": {"unknown": True}})
@@ -193,9 +213,12 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(start_status, 200)
         self.assertEqual(started_status["tracking"]["state"], "running")
         self.assertEqual(started_status["tracking"]["input_enabled"], True)
+        self.assertEqual(started_status["gaze"]["status"], "uncalibrated")
+        self.assertEqual(started_status["gaze"]["confidence"], 0.0)
         self.assertEqual(stop_status, 200)
         self.assertEqual(stopped_status["tracking"]["state"], "stopped")
         self.assertEqual(stopped_status["tracking"]["input_enabled"], False)
+        self.assertEqual(stopped_status["gaze"]["status"], "uncalibrated")
 
     def test_calibration_session_accepts_synthetic_samples_validates_and_persists_profile(self) -> None:
         initial = self.create_and_collect_calibration_session("initial-9-point")
@@ -246,6 +269,13 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(drifted["profile_id"], persisted["profile_id"])
         self.assertEqual(drifted["regression"], persisted["regression"])
         self.assertEqual(drifted["drift_corrections"], 1)
+
+        start_status, started = self.post("/controls/start")
+        self.assertEqual(start_status, 200)
+        self.assertEqual(started["gaze"]["status"], "valid")
+        self.assertEqual(started["gaze"]["confidence"], 1.0)
+        self.assertEqual(started["gaze"]["profile_id"], persisted["profile_id"])
+        self.assertIsInstance(started["gaze"]["sample_at_ms"], int)
 
     def test_calibration_rejects_invalid_sample_target_without_advancing(self) -> None:
         _create_status, session = self.request(

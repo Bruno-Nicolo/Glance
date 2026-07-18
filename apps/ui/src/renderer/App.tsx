@@ -245,6 +245,16 @@ function App() {
               <StatusRow label="Helper" value={status?.helper.state ?? 'loading'} />
               <StatusRow label="Camera" value={status?.camera.state ?? 'loading'} />
               <StatusRow label="Tracking" value={status?.tracking.state ?? 'loading'} />
+              <StatusRow label="Gaze" value={status?.gaze.status ?? 'loading'} />
+              <StatusRow label="Source" value={status?.gaze.source ?? 'loading'} />
+              <StatusRow
+                label="Confidence"
+                value={
+                  status?.gaze.confidence === null || status?.gaze.confidence === undefined
+                    ? 'pending'
+                    : status.gaze.confidence.toFixed(2)
+                }
+              />
               <StatusRow
                 label="Input"
                 value={status?.tracking.input_enabled ? 'enabled' : 'disabled'}

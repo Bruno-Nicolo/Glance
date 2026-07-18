@@ -15,6 +15,24 @@ export type CoreUiStatus = {
     state: 'stopped' | 'running' | 'paused' | 'error';
     input_enabled: boolean;
   };
+  gaze: {
+    contract_version: number;
+    profile_id: string | null;
+    status: 'valid' | 'low-confidence' | 'face-lost' | 'uncalibrated' | 'paused';
+    confidence: number | null;
+    sample_at_ms: number | null;
+    source: 'synthetic' | 'camera';
+    correction: 'idw-3x3';
+    smoothing_alpha: number;
+    confidence_threshold: number;
+    invalid_reason:
+      | 'face-lost'
+      | 'uncalibrated'
+      | 'paused'
+      | 'synthetic-disabled'
+      | 'tracking-stopped'
+      | null;
+  };
   calibration: {
     state: 'missing' | 'in-progress' | 'valid' | 'error';
     profile_id: string | null;

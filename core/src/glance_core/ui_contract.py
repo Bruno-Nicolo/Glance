@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from .gaze_mapping_contract import GazeMappingDebug
+
 CORE_UI_CONTRACT_VERSION = 1
 
 PauseBehavior = Literal["fast-recovery", "privacy-low-power"]
@@ -58,6 +60,7 @@ class CoreUiStatus:
     helper_state: HelperState
     tracking_state: TrackingState
     input_enabled: bool
+    gaze: GazeMappingDebug
     pid: int | None = None
     camera_state: CameraState = "stopped"
     camera_active: bool = False
@@ -75,6 +78,7 @@ class CoreUiStatus:
                 "state": self.tracking_state,
                 "input_enabled": self.input_enabled,
             },
+            "gaze": self.gaze.to_json_dict(),
             "calibration": {
                 "state": self.calibration_state,
                 "profile_id": self.calibration_profile_id,

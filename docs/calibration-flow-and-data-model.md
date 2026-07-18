@@ -200,6 +200,8 @@ Python Core persists exactly one active calibration profile for MVP 1:
 ```
 
 The executable mirror for this schema lives in `core/src/glance_core/calibration_contract.py`.
+Runtime use of the persisted regression and correction grid is defined in
+[Gaze Mapping and Confidence Contract](gaze-mapping-and-confidence-contract.md).
 
 ## Privacy Boundary
 
