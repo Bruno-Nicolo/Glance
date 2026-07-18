@@ -12,6 +12,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
+from .helper_events import CoreReadyEvent, now_ms
 from .paths import runtime_dir
 from .security import is_authorized, load_or_create_token
 
@@ -131,7 +132,9 @@ def create_app(state: RuntimeState) -> FastAPI:
 
         await websocket.accept()
         try:
-            await websocket.send_json({"type": "core.ready"})
+            await websocket.send_json(
+                CoreReadyEvent(sent_at_ms=now_ms(), sequence=0).to_json_dict()
+            )
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:

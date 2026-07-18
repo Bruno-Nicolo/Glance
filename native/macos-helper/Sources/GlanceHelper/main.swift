@@ -1,6 +1,125 @@
 import AppKit
 import Foundation
 
+enum HelperEventContract {
+    static let version = 1
+    static let targetFPS = 30
+    static let staleSampleMilliseconds = 150
+    static let coordinateSpace = "display-logical-top-left"
+    static let gazeStatuses = Set([
+        "valid",
+        "low-confidence",
+        "face-lost",
+        "uncalibrated",
+        "paused"
+    ])
+    static let gazeSources = Set(["synthetic", "camera"])
+    static let trackingStates = Set(["running", "paused", "stopped"])
+    static let overlayStates = Set(["visible", "hidden", "frozen"])
+}
+
+struct HelperEventEnvelope: Decodable {
+    let type: String
+    let version: Int
+    let sentAtMilliseconds: Int64
+    let sequence: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case version
+        case sentAtMilliseconds = "sent_at_ms"
+        case sequence
+    }
+}
+
+struct DisplayBounds: Decodable {
+    let id: String
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+    let scale: Double
+    let coordinateSpace: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case x
+        case y
+        case width
+        case height
+        case scale
+        case coordinateSpace = "coordinate_space"
+    }
+}
+
+struct CoreReadyEvent: Decodable {
+    let type: String
+    let version: Int
+    let sentAtMilliseconds: Int64
+    let sequence: Int
+    let minVersion: Int
+    let targetFPS: Int
+    let staleSampleMilliseconds: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case version
+        case sentAtMilliseconds = "sent_at_ms"
+        case sequence
+        case minVersion = "min_version"
+        case targetFPS = "target_fps"
+        case staleSampleMilliseconds = "stale_sample_ms"
+    }
+}
+
+struct GazeSampleEvent: Decodable {
+    let type: String
+    let version: Int
+    let sentAtMilliseconds: Int64
+    let sequence: Int
+    let sampleAtMilliseconds: Int64
+    let x: Double
+    let y: Double
+    let display: DisplayBounds
+    let confidence: Double
+    let status: String
+    let source: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case version
+        case sentAtMilliseconds = "sent_at_ms"
+        case sequence
+        case sampleAtMilliseconds = "sample_at_ms"
+        case x
+        case y
+        case display
+        case confidence
+        case status
+        case source
+    }
+}
+
+struct TrackingStatusEvent: Decodable {
+    let type: String
+    let version: Int
+    let sentAtMilliseconds: Int64
+    let sequence: Int
+    let tracking: String
+    let overlay: String
+    let reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case version
+        case sentAtMilliseconds = "sent_at_ms"
+        case sequence
+        case tracking
+        case overlay
+        case reason
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlayWindow: NSWindow?
     private var coreSocket: CoreSocket?
@@ -71,6 +190,7 @@ final class CoreSocket {
     private let url: URL
     private let token: String
     private var task: URLSessionWebSocketTask?
+    private let decoder = JSONDecoder()
 
     init(url: URL, token: String) {
         self.url = url
@@ -89,12 +209,88 @@ final class CoreSocket {
     private func receive() {
         task?.receive { [weak self] result in
             switch result {
-            case .success:
+            case .success(let message):
+                self?.handle(message: message)
                 self?.receive()
             case .failure(let error):
                 print("GlanceHelper Core WebSocket closed: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func handle(message: URLSessionWebSocketTask.Message) {
+        let data: Data
+        switch message {
+        case .string(let text):
+            data = Data(text.utf8)
+        case .data(let payload):
+            data = payload
+        @unknown default:
+            print("GlanceHelper ignored unknown WebSocket message kind")
+            return
+        }
+
+        do {
+            let envelope = try decoder.decode(HelperEventEnvelope.self, from: data)
+            guard envelope.version == HelperEventContract.version else {
+                print("GlanceHelper ignored unsupported event version \(envelope.version)")
+                return
+            }
+
+            switch envelope.type {
+            case "core.ready":
+                _ = try decoder.decode(CoreReadyEvent.self, from: data)
+            case "gaze.sample":
+                let event = try decoder.decode(GazeSampleEvent.self, from: data)
+                guard isValid(gazeSample: event) else {
+                    print("GlanceHelper ignored invalid gaze.sample event")
+                    return
+                }
+            case "tracking.status":
+                let event = try decoder.decode(TrackingStatusEvent.self, from: data)
+                guard isValid(trackingStatus: event) else {
+                    print("GlanceHelper ignored invalid tracking.status event")
+                    return
+                }
+            default:
+                print("GlanceHelper ignored unknown event type \(envelope.type)")
+            }
+        } catch {
+            print("GlanceHelper ignored malformed event: \(error.localizedDescription)")
+        }
+    }
+
+    private func isValid(gazeSample event: GazeSampleEvent) -> Bool {
+        guard
+            event.x.isFinite,
+            event.y.isFinite,
+            event.display.x.isFinite,
+            event.display.y.isFinite,
+            event.display.width.isFinite,
+            event.display.height.isFinite,
+            event.display.scale.isFinite,
+            event.display.width > 0,
+            event.display.height > 0,
+            event.display.scale > 0,
+            event.display.coordinateSpace == HelperEventContract.coordinateSpace,
+            event.confidence.isFinite,
+            (0...1).contains(event.confidence),
+            HelperEventContract.gazeStatuses.contains(event.status),
+            HelperEventContract.gazeSources.contains(event.source)
+        else {
+            return false
+        }
+
+        let minX = event.display.x - event.display.width
+        let maxX = event.display.x + (event.display.width * 2)
+        let minY = event.display.y - event.display.height
+        let maxY = event.display.y + (event.display.height * 2)
+        return (minX...maxX).contains(event.x) && (minY...maxY).contains(event.y)
+    }
+
+    private func isValid(trackingStatus event: TrackingStatusEvent) -> Bool {
+        HelperEventContract.trackingStates.contains(event.tracking)
+            && HelperEventContract.overlayStates.contains(event.overlay)
     }
 }
 
