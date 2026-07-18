@@ -37,7 +37,11 @@ Returns UI dashboard state. `ui.runtime_critical` is always `false` in MVP 1.
   "contract_version": 1,
   "core": { "state": "running", "pid": 1234 },
   "helper": { "state": "running" },
-  "camera": { "state": "stopped", "active": false },
+  "camera": {
+    "state": "stopped",
+    "active": false,
+    "metrics": null
+  },
   "tracking": { "state": "stopped", "input_enabled": false },
   "gaze": {
     "contract_version": 1,
@@ -71,6 +75,27 @@ Allowed states:
 sample time, source, correction mode, smoothing alpha, threshold, and invalid reason, but never
 camera frames, raw landmarks, feature vectors, quality vectors, or gaze traces. See
 [Gaze Mapping and Confidence Contract](gaze-mapping-and-confidence-contract.md).
+
+When real camera tracking is active, `camera.metrics` may report privacy-preserving aggregate
+measurement counters:
+
+```json
+{
+  "captured_frames": 120,
+  "inference_results": 118,
+  "emitted_samples": 118,
+  "invalid_samples": 3,
+  "dropped_frames": 2,
+  "last_sample_at_ms": 1721300000000,
+  "last_error": null,
+  "captured_fps": 29.8,
+  "inference_fps": 29.3,
+  "emitted_fps": 29.3
+}
+```
+
+These metrics must not include frames, raw landmarks, feature vectors, quality vectors, or gaze
+traces.
 
 ### `GET /settings`
 

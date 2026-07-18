@@ -10,6 +10,18 @@ export type CoreUiStatus = {
   camera: {
     state: 'stopped' | 'starting' | 'running' | 'error';
     active: boolean;
+    metrics: {
+      captured_frames: number;
+      inference_results: number;
+      emitted_samples: number;
+      invalid_samples: number;
+      dropped_frames: number;
+      last_sample_at_ms: number | null;
+      last_error: string | null;
+      captured_fps: number;
+      inference_fps: number;
+      emitted_fps: number;
+    } | null;
   };
   tracking: {
     state: 'stopped' | 'running' | 'paused' | 'error';

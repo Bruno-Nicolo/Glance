@@ -10,6 +10,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from fastapi import (
     BackgroundTasks,
@@ -23,6 +24,12 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 import uvicorn
 
+from .camera_gaze import (
+    CameraGazeError,
+    CameraGazeMetrics,
+    MediaPipeOpenCVCamera,
+    gaze_sample_event_from_mapping,
+)
 from .helper_events import (
     HELPER_FRAME_INTERVAL_MS,
     CoreReadyEvent,
@@ -31,7 +38,7 @@ from .helper_events import (
     TrackingStatusEvent,
     now_ms,
 )
-from .gaze_mapping_contract import GazeInvalidReason, GazeMappingDebug
+from .gaze_mapping_contract import GazeInvalidReason, GazeMappingDebug, RawGazeSample, map_gaze_sample
 from .calibration_sessions import (
     CalibrationSessionError,
     CalibrationSessionRecord,
@@ -58,6 +65,16 @@ class RuntimeState:
     port: int
     config_path: Path | None = None
     runtime_path: Path | None = None
+
+
+class CameraSampleProvider(Protocol):
+    metrics: CameraGazeMetrics
+
+    def sample(self) -> RawGazeSample | None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 class HelperProcess:
@@ -122,6 +139,7 @@ class HelperProcess:
 def create_app(
     state: RuntimeState,
     shutdown_callback: Callable[[], None] | None = None,
+    camera_factory: Callable[[], CameraSampleProvider] | None = None,
 ) -> FastAPI:
     helper = HelperProcess(token=state.token, port=state.port)
     synthetic_gaze_path = SyntheticGazePath(display=synthetic_display_bounds())
@@ -129,6 +147,11 @@ def create_app(
     calibration_store = CalibrationSessionStore(calibration_profile_path(settings_path))
     settings = load_settings(settings_path)
     tracking_state = "stopped"
+    camera_state = "stopped"
+    camera_error: str | None = None
+    camera_provider: CameraSampleProvider | None = None
+    previous_camera_output: tuple[float, float] | None = None
+    last_camera_gaze: GazeMappingDebug | None = None
     ui_event_clients: set[WebSocket] = set()
 
     @asynccontextmanager
@@ -138,6 +161,7 @@ def create_app(
         (runtime / "core.port").write_text(str(state.port), encoding="utf-8")
         helper.start()
         yield
+        close_camera_provider(camera_provider)
         helper.stop()
 
     app = FastAPI(title="Glance Core", version="0.1.0", lifespan=lifespan)
@@ -156,6 +180,37 @@ def create_app(
     def current_status() -> CoreUiStatus:
         synthetic_enabled = settings.debug.synthetic_gaze_enabled
         calibrated = calibration_store.profile_id is not None
+        camera_active = not synthetic_enabled and tracking_state == "running" and camera_state == "running"
+        if not synthetic_enabled and last_camera_gaze is not None and tracking_state == "running":
+            gaze = last_camera_gaze
+        else:
+            gaze = status_gaze_debug(synthetic_enabled=synthetic_enabled, calibrated=calibrated)
+
+        return CoreUiStatus(
+            pid=os.getpid() if state.runtime_path is None else None,
+            helper_state=helper.status,
+            tracking_state=tracking_state,
+            input_enabled=tracking_state == "running" and settings.input.space_click_enabled,
+            gaze=gaze,
+            camera_state=camera_state if not synthetic_enabled else "stopped",
+            camera_active=camera_active,
+            camera_metrics=(
+                camera_provider.metrics.to_json_dict(now_ms=now_ms())
+                if not synthetic_enabled and camera_provider is not None
+                else None
+            ),
+            calibration_state=calibration_store.state,
+            calibration_profile_id=calibration_store.profile_id,
+            error=ContractError(
+                code="camera_unavailable",
+                message=camera_error,
+                recoverable=True,
+            )
+            if camera_error
+            else None,
+        )
+
+    def status_gaze_debug(*, synthetic_enabled: bool, calibrated: bool) -> GazeMappingDebug:
         gaze_running = tracking_state == "running" and synthetic_enabled and calibrated
         invalid_reason: GazeInvalidReason | None = None
         if not synthetic_enabled:
@@ -166,23 +221,15 @@ def create_app(
             invalid_reason = "paused" if tracking_state == "paused" else "tracking-stopped"
         gaze_status = "valid" if gaze_running else "uncalibrated" if invalid_reason == "uncalibrated" else "paused"
 
-        return CoreUiStatus(
-            pid=os.getpid() if state.runtime_path is None else None,
-            helper_state=helper.status,
-            tracking_state=tracking_state,
-            input_enabled=tracking_state == "running" and settings.input.space_click_enabled,
-            gaze=GazeMappingDebug(
-                profile_id=calibration_store.profile_id,
-                status=gaze_status,
-                confidence=1.0 if gaze_running else 0.0,
-                sample_at_ms=now_ms() if gaze_running else None,
-                source="synthetic" if synthetic_enabled else "camera",
-                smoothing_alpha=settings.tracking.smoothing,
-                confidence_threshold=settings.tracking.confidence_threshold,
-                invalid_reason=invalid_reason,
-            ),
-            calibration_state=calibration_store.state,
-            calibration_profile_id=calibration_store.profile_id,
+        return GazeMappingDebug(
+            profile_id=calibration_store.profile_id,
+            status=gaze_status,
+            confidence=1.0 if gaze_running else 0.0,
+            sample_at_ms=now_ms() if gaze_running else None,
+            source="synthetic" if synthetic_enabled else "camera",
+            smoothing_alpha=settings.tracking.smoothing,
+            confidence_threshold=settings.tracking.confidence_threshold,
+            invalid_reason=invalid_reason,
         )
 
     def status_changed_event() -> dict[str, object]:
@@ -405,6 +452,7 @@ def create_app(
 
     @app.websocket("/events")
     async def events(websocket: WebSocket):
+        nonlocal camera_provider, camera_state, camera_error, previous_camera_output, last_camera_gaze
         authorization = websocket.headers.get("authorization")
         if not is_authorized(authorization, state.token):
             await websocket.close(code=1008)
@@ -421,21 +469,71 @@ def create_app(
                 TrackingStatusEvent(
                     sent_at_ms=now_ms(),
                     sequence=sequence,
-                    tracking="running",
-                    overlay="visible",
-                    reason="synthetic-startup",
+                    tracking="running" if tracking_state == "running" else "stopped",
+                    overlay="visible" if tracking_state == "running" else "hidden",
+                    reason="synthetic-startup" if settings.debug.synthetic_gaze_enabled else "camera-startup",
                 ).to_json_dict()
             )
             sequence += 1
             while True:
                 sent_at_ms = now_ms()
-                await websocket.send_json(
-                    synthetic_gaze_path.sample(
-                        sequence=sequence,
-                        sent_at_ms=sent_at_ms,
-                    ).to_json_dict()
-                )
-                sequence += 1
+                if settings.debug.synthetic_gaze_enabled:
+                    await websocket.send_json(
+                        synthetic_gaze_path.sample(
+                            sequence=sequence,
+                            sent_at_ms=sent_at_ms,
+                        ).to_json_dict()
+                    )
+                    sequence += 1
+                elif tracking_state == "running":
+                    try:
+                        if camera_provider is None:
+                            camera_provider = (
+                                camera_factory()
+                                if camera_factory is not None
+                                else MediaPipeOpenCVCamera(model_asset_path=camera_model_asset_path())
+                            )
+                        camera_state = "running"
+                        camera_error = None
+                        sample = await asyncio.to_thread(camera_provider.sample)
+                    except CameraGazeError as error:
+                        camera_state = "error"
+                        camera_error = str(error)
+                        await websocket.send_json(
+                            TrackingStatusEvent(
+                                sent_at_ms=sent_at_ms,
+                                sequence=sequence,
+                                tracking="paused",
+                                overlay="frozen",
+                                reason="camera-unavailable",
+                            ).to_json_dict()
+                        )
+                        sequence += 1
+                        await asyncio.sleep(1)
+                        continue
+
+                    if sample is not None:
+                        mapped = map_gaze_sample(
+                            sample,
+                            profile=calibration_store.profile,
+                            previous_output=previous_camera_output,
+                            smoothing_alpha=settings.tracking.smoothing,
+                            confidence_threshold=settings.tracking.confidence_threshold,
+                        )
+                        if mapped.status in {"valid", "low-confidence"}:
+                            previous_camera_output = (mapped.x, mapped.y)
+                        last_camera_gaze = mapped.debug()
+                        event = gaze_sample_event_from_mapping(
+                            mapped,
+                            display=synthetic_display_bounds(),
+                            sent_at_ms=sent_at_ms,
+                            sequence=sequence,
+                        )
+                        await websocket.send_json(event.to_json_dict())
+                        camera_provider.metrics.record_sample_emitted()
+                        sequence += 1
+                else:
+                    camera_state = "stopped"
                 await asyncio.sleep(HELPER_FRAME_INTERVAL_MS / 1000)
         except WebSocketDisconnect:
             return
@@ -494,6 +592,18 @@ def synthetic_display_bounds() -> DisplayBounds:
         height=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_HEIGHT", "900")),
         scale=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_SCALE", "2")),
     )
+
+
+def camera_model_asset_path() -> Path:
+    configured = os.environ.get("GLANCE_FACE_LANDMARKER_MODEL_PATH")
+    if configured:
+        return Path(configured)
+    return application_support_dir() / "models" / "face_landmarker.task"
+
+
+def close_camera_provider(provider: CameraSampleProvider | None) -> None:
+    if provider is not None:
+        provider.close()
 
 
 def raise_calibration_error(code: str, message: str) -> None:

@@ -15,6 +15,9 @@ from urllib.request import Request, urlopen
 import uvicorn
 import websockets
 
+from glance_core.calibration_contract import CALIBRATION_FEATURE_NAMES
+from glance_core.camera_gaze import CameraGazeMetrics
+from glance_core.gaze_mapping_contract import RawGazeSample
 from glance_core.server import RuntimeState, create_app
 
 
@@ -38,6 +41,7 @@ class CoreUiApiContractTests(unittest.TestCase):
                 runtime_path=self.runtime_path,
             ),
             shutdown_callback=self._mark_shutdown_requested,
+            camera_factory=FakeCameraSampleProvider,
         )
         self.server = uvicorn.Server(
             uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="critical")
@@ -133,7 +137,7 @@ class CoreUiApiContractTests(unittest.TestCase):
                 "contract_version": 1,
                 "core": {"state": "running", "pid": None},
                 "helper": {"state": "not-started"},
-                "camera": {"state": "stopped", "active": False},
+                "camera": {"state": "stopped", "active": False, "metrics": None},
                 "tracking": {"state": "stopped", "input_enabled": False},
                 "gaze": {
                     "contract_version": 1,
@@ -409,6 +413,75 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(status["status"]["tracking"]["state"], "stopped")
         self.assertEqual(changed["type"], "status.changed")
         self.assertEqual(changed["status"]["tracking"]["state"], "running")
+
+    def test_helper_websocket_streams_mapped_camera_samples_when_synthetic_is_disabled(self) -> None:
+        initial = self.create_and_collect_calibration_session("initial-9-point")
+        initial_complete_status, _initial_complete = self.post(
+            f"/calibration/sessions/{initial['session_id']}/complete"
+        )
+        validation = self.create_and_collect_calibration_session("validation")
+        validation_complete_status, _validation_complete = self.post(
+            f"/calibration/sessions/{validation['session_id']}/complete"
+        )
+        put_status, _put_body = self.put("/settings", {"debug": {"synthetic_gaze_enabled": False}})
+        start_status, _start_body = self.post("/controls/start")
+
+        async def receive_camera_sample() -> tuple[dict, dict, dict]:
+            async with websockets.connect(
+                f"ws://127.0.0.1:{self.port}/events",
+                additional_headers=self.headers,
+                proxy=None,
+            ) as websocket:
+                ready = json.loads(await websocket.recv())
+                tracking = json.loads(await websocket.recv())
+                sample = json.loads(await asyncio.wait_for(websocket.recv(), timeout=2))
+                return ready, tracking, sample
+
+        ready, tracking, sample = asyncio.run(receive_camera_sample())
+        _status_code, status = self.get("/status")
+
+        self.assertEqual(initial_complete_status, 200)
+        self.assertEqual(validation_complete_status, 200)
+        self.assertEqual(put_status, 200)
+        self.assertEqual(start_status, 200)
+        self.assertEqual(ready["type"], "core.ready")
+        self.assertEqual(tracking["reason"], "camera-startup")
+        self.assertEqual(sample["type"], "gaze.sample")
+        self.assertEqual(sample["source"], "camera")
+        self.assertEqual(sample["status"], "valid")
+        self.assertGreaterEqual(sample["confidence"], 0.9)
+        self.assertEqual(status["camera"]["state"], "running")
+        self.assertEqual(status["camera"]["active"], True)
+        self.assertEqual(status["camera"]["metrics"]["captured_frames"], 1)
+        self.assertEqual(status["camera"]["metrics"]["inference_results"], 1)
+        self.assertEqual(status["camera"]["metrics"]["emitted_samples"], 1)
+        self.assertEqual(status["camera"]["metrics"]["invalid_samples"], 0)
+        self.assertEqual(status["gaze"]["source"], "camera")
+        self.assertEqual(status["gaze"]["status"], "valid")
+
+
+class FakeCameraSampleProvider:
+    def __init__(self) -> None:
+        self.metrics = CameraGazeMetrics(started_at_ms=int(time.time() * 1000))
+
+    def sample(self) -> RawGazeSample:
+        sample_at_ms = int(time.time() * 1000)
+        self.metrics.record_frame_submitted()
+        self.metrics.record_inference_result(sample_at_ms=sample_at_ms, valid=True)
+        return RawGazeSample(
+            sample_at_ms=sample_at_ms,
+            features={name: 0.5 for name in CALIBRATION_FEATURE_NAMES},
+            quality={
+                "eye_openness": 0.95,
+                "landmark_stability": 0.96,
+                "face_stability": 0.97,
+                "left_right_divergence": 0.04,
+                "temporal_jitter": 0.03,
+            },
+        )
+
+    def close(self) -> None:
+        return None
 
 
 if __name__ == "__main__":

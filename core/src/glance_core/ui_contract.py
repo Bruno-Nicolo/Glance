@@ -64,6 +64,7 @@ class CoreUiStatus:
     pid: int | None = None
     camera_state: CameraState = "stopped"
     camera_active: bool = False
+    camera_metrics: dict[str, object] | None = None
     calibration_state: CalibrationState = "missing"
     calibration_profile_id: str | None = None
     error: ContractError | None = None
@@ -73,7 +74,11 @@ class CoreUiStatus:
             "contract_version": CORE_UI_CONTRACT_VERSION,
             "core": {"state": "running", "pid": self.pid},
             "helper": {"state": self.helper_state},
-            "camera": {"state": self.camera_state, "active": self.camera_active},
+            "camera": {
+                "state": self.camera_state,
+                "active": self.camera_active,
+                "metrics": self.camera_metrics,
+            },
             "tracking": {
                 "state": self.tracking_state,
                 "input_enabled": self.input_enabled,
