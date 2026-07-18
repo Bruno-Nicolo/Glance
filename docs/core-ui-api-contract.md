@@ -36,7 +36,18 @@ Returns UI dashboard state. `ui.runtime_critical` is always `false` in MVP 1.
 {
   "contract_version": 1,
   "core": { "state": "running", "pid": 1234 },
-  "helper": { "state": "running" },
+  "helper": {
+    "state": "running",
+    "input": {
+      "latest_action": null,
+      "latest_suppressed_reason": null,
+      "paused": false,
+      "permissions": {
+        "accessibility": "unknown",
+        "input_monitoring": "unknown"
+      }
+    }
+  },
   "camera": {
     "state": "stopped",
     "active": false,
@@ -75,6 +86,11 @@ Allowed states:
 sample time, source, correction mode, smoothing alpha, threshold, and invalid reason, but never
 camera frames, raw landmarks, feature vectors, quality vectors, or gaze traces. See
 [Gaze Mapping and Confidence Contract](gaze-mapping-and-confidence-contract.md).
+
+`helper.input` is privacy-preserving debug/status telemetry for Helper-owned Space/Esc handling.
+It reports only the latest action, latest suppressed reason, whether Esc pause is currently active,
+and current permission state. It is not an input history and must not be persisted by default. See
+[Helper Input Behavior Contract](helper-input-behavior-contract.md).
 
 When real camera tracking is active, `camera.metrics` may report privacy-preserving aggregate
 measurement counters:
@@ -317,3 +333,6 @@ Calibration UI changes use:
 ```
 
 Runtime gaze samples for Swift Helper remain on `/events` and are not routed through Electron.
+Helper-to-Core Space/Esc input and permission messages also use `/events`; see
+[Helper Input Behavior Contract](helper-input-behavior-contract.md). Core/UI may surface only the
+latest privacy-preserving Helper input/debug state, not a persisted input history.

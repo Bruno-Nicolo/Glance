@@ -136,7 +136,18 @@ class CoreUiApiContractTests(unittest.TestCase):
             {
                 "contract_version": 1,
                 "core": {"state": "running", "pid": None},
-                "helper": {"state": "not-started"},
+                "helper": {
+                    "state": "not-started",
+                    "input": {
+                        "latest_action": None,
+                        "latest_suppressed_reason": None,
+                        "paused": False,
+                        "permissions": {
+                            "accessibility": "unknown",
+                            "input_monitoring": "unknown",
+                        },
+                    },
+                },
                 "camera": {"state": "stopped", "active": False, "metrics": None},
                 "tracking": {"state": "stopped", "input_enabled": False},
                 "gaze": {

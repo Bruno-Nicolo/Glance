@@ -7,8 +7,11 @@ from glance_core.helper_events import (
     HELPER_STALE_SAMPLE_MS,
     HELPER_TARGET_FPS,
     CoreReadyEvent,
+    CursorPoint,
     DisplayBounds,
     GazeSampleEvent,
+    HelperInputEvent,
+    HelperPermissionEvent,
     SyntheticGazePath,
     TrackingStatusEvent,
 )
@@ -66,6 +69,58 @@ class HelperEventContractTests(unittest.TestCase):
         self.assertEqual(payload["tracking"], "paused")
         self.assertEqual(payload["overlay"], "frozen")
         self.assertEqual(payload["reason"], "esc-held")
+
+    def test_helper_input_payload_reports_space_click_at_cursor_without_key_history(self) -> None:
+        display = DisplayBounds(
+            id="main",
+            x=0,
+            y=0,
+            width=1440,
+            height=900,
+            scale=2,
+        )
+
+        payload = HelperInputEvent(
+            sent_at_ms=1200,
+            sequence=5,
+            action="space-click",
+            cursor=CursorPoint(x=512.5, y=384.25, display=display),
+        ).to_json_dict()
+
+        self.assertEqual(payload["type"], "helper.input")
+        self.assertEqual(payload["action"], "space-click")
+        self.assertEqual(payload["cursor"]["x"], 512.5)
+        self.assertEqual(payload["cursor"]["display"]["coordinate_space"], "display-logical-top-left")
+        self.assertNotIn("key_code", payload)
+        self.assertNotIn("history", payload)
+
+    def test_helper_input_payload_reports_suppressed_actions_without_cursor(self) -> None:
+        payload = HelperInputEvent(
+            sent_at_ms=1233,
+            sequence=6,
+            action="space-click",
+            suppressed_reason="permission-denied",
+        ).to_json_dict()
+
+        self.assertEqual(payload["type"], "helper.input")
+        self.assertEqual(payload["action"], "space-click")
+        self.assertEqual(payload["cursor"], None)
+        self.assertEqual(payload["suppressed_reason"], "permission-denied")
+
+    def test_helper_permission_payload_identifies_recoverable_missing_permissions(self) -> None:
+        payload = HelperPermissionEvent(
+            sent_at_ms=1266,
+            sequence=7,
+            permission="accessibility",
+            state="denied",
+            required_for=["space-click"],
+        ).to_json_dict()
+
+        self.assertEqual(payload["type"], "helper.permission")
+        self.assertEqual(payload["permission"], "accessibility")
+        self.assertEqual(payload["state"], "denied")
+        self.assertEqual(payload["required_for"], ["space-click"])
+        self.assertEqual(payload["recoverable"], True)
 
     def test_synthetic_gaze_path_emits_valid_looping_screen_samples(self) -> None:
         display = DisplayBounds(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,6 +15,23 @@ HelperState = Literal["not-started", "running", "exited", "error"]
 CameraState = Literal["stopped", "starting", "running", "error"]
 TrackingState = Literal["stopped", "running", "paused", "error"]
 CalibrationState = Literal["missing", "in-progress", "valid", "error"]
+HelperInputAction = Literal[
+    "space-down",
+    "space-up",
+    "space-click",
+    "esc-down",
+    "esc-up",
+    "pause-started",
+    "pause-ended",
+]
+HelperInputSuppressedReason = Literal[
+    "disabled",
+    "paused",
+    "permission-denied",
+    "repeat",
+    "no-cursor",
+]
+HelperPermissionState = Literal["granted", "denied", "unknown"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -56,11 +73,28 @@ class CoreUiSettings:
 
 
 @dataclass(frozen=True, kw_only=True)
+class HelperInputDebug:
+    latest_action: HelperInputAction | None = None
+    latest_suppressed_reason: HelperInputSuppressedReason | None = None
+    paused: bool = False
+    permissions: dict[str, HelperPermissionState] = field(
+        default_factory=lambda: {
+            "accessibility": "unknown",
+            "input_monitoring": "unknown",
+        }
+    )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, kw_only=True)
 class CoreUiStatus:
     helper_state: HelperState
     tracking_state: TrackingState
     input_enabled: bool
     gaze: GazeMappingDebug
+    helper_input: HelperInputDebug = field(default_factory=HelperInputDebug)
     pid: int | None = None
     camera_state: CameraState = "stopped"
     camera_active: bool = False
@@ -73,7 +107,10 @@ class CoreUiStatus:
         return {
             "contract_version": CORE_UI_CONTRACT_VERSION,
             "core": {"state": "running", "pid": self.pid},
-            "helper": {"state": self.helper_state},
+            "helper": {
+                "state": self.helper_state,
+                "input": self.helper_input.to_json_dict(),
+            },
             "camera": {
                 "state": self.camera_state,
                 "active": self.camera_active,

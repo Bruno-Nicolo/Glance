@@ -6,6 +6,29 @@ export type CoreUiStatus = {
   };
   helper: {
     state: 'not-started' | 'running' | 'exited' | 'error';
+    input: {
+      latest_action:
+        | 'space-down'
+        | 'space-up'
+        | 'space-click'
+        | 'esc-down'
+        | 'esc-up'
+        | 'pause-started'
+        | 'pause-ended'
+        | null;
+      latest_suppressed_reason:
+        | 'disabled'
+        | 'paused'
+        | 'permission-denied'
+        | 'repeat'
+        | 'no-cursor'
+        | null;
+      paused: boolean;
+      permissions: {
+        accessibility: 'granted' | 'denied' | 'unknown';
+        input_monitoring: 'granted' | 'denied' | 'unknown';
+      };
+    };
   };
   camera: {
     state: 'stopped' | 'starting' | 'running' | 'error';

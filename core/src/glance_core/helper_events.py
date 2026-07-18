@@ -25,6 +25,25 @@ GazeStatus = Literal[
 ]
 TrackingState = Literal["running", "paused", "stopped"]
 OverlayState = Literal["visible", "hidden", "frozen"]
+HelperInputAction = Literal[
+    "space-down",
+    "space-up",
+    "space-click",
+    "esc-down",
+    "esc-up",
+    "pause-started",
+    "pause-ended",
+]
+HelperInputSuppressedReason = Literal[
+    "disabled",
+    "paused",
+    "permission-denied",
+    "repeat",
+    "no-cursor",
+]
+HelperPermissionName = Literal["accessibility", "input-monitoring"]
+HelperPermissionState = Literal["granted", "denied", "unknown"]
+HelperPermissionRequirement = Literal["space-click", "esc-pause"]
 
 
 def now_ms() -> int:
@@ -79,6 +98,30 @@ class TrackingStatusEvent(HelperEvent):
     overlay: OverlayState = "hidden"
     reason: str | None = None
     type: Literal["tracking.status"] = "tracking.status"
+
+
+@dataclass(frozen=True, kw_only=True)
+class CursorPoint:
+    x: float
+    y: float
+    display: DisplayBounds
+
+
+@dataclass(frozen=True, kw_only=True)
+class HelperInputEvent(HelperEvent):
+    action: HelperInputAction
+    cursor: CursorPoint | None = None
+    suppressed_reason: HelperInputSuppressedReason | None = None
+    type: Literal["helper.input"] = "helper.input"
+
+
+@dataclass(frozen=True, kw_only=True)
+class HelperPermissionEvent(HelperEvent):
+    permission: HelperPermissionName
+    state: HelperPermissionState
+    required_for: list[HelperPermissionRequirement]
+    recoverable: bool = True
+    type: Literal["helper.permission"] = "helper.permission"
 
 
 @dataclass(frozen=True)
