@@ -96,6 +96,9 @@ class ValidationMetrics:
     max_error_threshold_px: float
     sample_count: int
 
+    def to_json_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass(frozen=True, kw_only=True)
 class CalibrationProfile:

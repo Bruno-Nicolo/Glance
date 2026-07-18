@@ -31,6 +31,13 @@ from .helper_events import (
     TrackingStatusEvent,
     now_ms,
 )
+from .calibration_sessions import (
+    CalibrationSessionError,
+    CalibrationSessionRecord,
+    CalibrationSessionStore,
+    calibration_display_from_bounds,
+    calibration_session_response,
+)
 from .paths import application_support_dir, runtime_dir
 from .security import is_authorized, load_or_create_token
 from .ui_contract import (
@@ -118,6 +125,7 @@ def create_app(
     helper = HelperProcess(token=state.token, port=state.port)
     synthetic_gaze_path = SyntheticGazePath(display=synthetic_display_bounds())
     settings_path = state.config_path or (application_support_config_path())
+    calibration_store = CalibrationSessionStore(calibration_profile_path(settings_path))
     settings = load_settings(settings_path)
     tracking_state = "stopped"
     ui_event_clients: set[WebSocket] = set()
@@ -150,6 +158,8 @@ def create_app(
             helper_state=helper.status,
             tracking_state=tracking_state,
             input_enabled=tracking_state == "running" and settings.input.space_click_enabled,
+            calibration_state=calibration_store.state,
+            calibration_profile_id=calibration_store.profile_id,
         )
 
     def status_changed_event() -> dict[str, object]:
@@ -242,6 +252,118 @@ def create_app(
         await broadcast_status_changed()
         return current_status().to_json_dict()
 
+    @app.post("/calibration/sessions")
+    async def create_calibration_session(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        nonlocal tracking_state
+        require_auth(authorization)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise_calibration_error("invalid_calibration_session", "Calibration request must be an object")
+
+        mode = payload.get("mode")
+        if mode not in ("initial-9-point", "validation", "drift-1-point") or payload.get("display_id") != "main":
+            raise_calibration_error(
+                "invalid_calibration_session",
+                "Calibration session requires a supported mode and display_id main",
+            )
+
+        display = calibration_display_from_bounds(synthetic_display_bounds())
+        try:
+            session = calibration_store.create(mode=mode, display=display)
+        except CalibrationSessionError as error:
+            raise_calibration_error(error.code, str(error))
+        tracking_state = "paused"
+        await broadcast_status_changed()
+        return calibration_session_response(session)
+
+    @app.post("/calibration/sessions/{session_id}/samples")
+    async def add_calibration_samples(
+        session_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        require_auth(authorization)
+        payload = await request.json()
+        try:
+            session = calibration_store.add_samples(session_id, payload)
+        except CalibrationSessionError as error:
+            raise_calibration_error(error.code, str(error))
+
+        await broadcast_calibration_changed(session)
+        return calibration_session_response(session)
+
+    @app.post("/calibration/sessions/{session_id}/complete")
+    async def complete_calibration_session(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        nonlocal tracking_state
+        require_auth(authorization)
+        try:
+            session, profile, validation = calibration_store.complete(session_id)
+        except CalibrationSessionError as error:
+            raise_calibration_error(error.code, str(error))
+        tracking_state = "stopped"
+        await broadcast_status_changed()
+        return {
+            "contract_version": 1,
+            "session_id": session.session_id,
+            "state": "complete",
+            "mode": session.mode,
+            "profile_id": profile.profile_id if profile else None,
+            "validation": validation.to_json_dict() if validation is not None else None,
+            "status": current_status().to_json_dict(),
+            "error": None,
+        }
+
+    @app.delete("/calibration/sessions/{session_id}")
+    async def cancel_calibration_session(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        nonlocal tracking_state
+        require_auth(authorization)
+        try:
+            session = calibration_store.cancel(session_id)
+        except CalibrationSessionError as error:
+            raise_calibration_error(error.code, str(error))
+        tracking_state = "stopped"
+        await broadcast_status_changed()
+        return {
+            "contract_version": 1,
+            "session_id": session.session_id,
+            "state": "cancelled",
+            "status": current_status().to_json_dict(),
+            "error": None,
+        }
+
+    async def broadcast_calibration_changed(session: CalibrationSessionRecord) -> None:
+        event = {
+            "type": "calibration.changed",
+            "contract_version": 1,
+            "session_id": session.session_id,
+            "state": session.state,
+            "target_id": (
+                session.targets[session.current_target_index].id
+                if session.current_target_index < len(session.targets)
+                else None
+            ),
+            "completed_targets": min(session.current_target_index, len(session.targets)),
+            "total_targets": len(session.targets),
+            "error": None,
+        }
+        disconnected: list[WebSocket] = []
+        for client in ui_event_clients:
+            try:
+                await client.send_json(event)
+            except RuntimeError:
+                disconnected.append(client)
+        for client in disconnected:
+            ui_event_clients.discard(client)
+
     @app.post("/shutdown")
     async def shutdown(
         background_tasks: BackgroundTasks,
@@ -326,6 +448,10 @@ def application_support_config_path() -> Path:
     return application_support_dir() / "config.json"
 
 
+def calibration_profile_path(config_path: Path) -> Path:
+    return config_path.parent / "calibration.json"
+
+
 def ensure_runtime_path(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path, 0o700)
@@ -344,6 +470,13 @@ def synthetic_display_bounds() -> DisplayBounds:
         width=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_WIDTH", "1440")),
         height=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_HEIGHT", "900")),
         scale=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_SCALE", "2")),
+    )
+
+
+def raise_calibration_error(code: str, message: str) -> None:
+    raise HTTPException(
+        status_code=400,
+        detail=ContractError(code=code, message=message, recoverable=True).to_response(),
     )
 
 

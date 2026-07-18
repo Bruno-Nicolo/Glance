@@ -10,6 +10,9 @@
   },
   "include": [
     "src/main/core-lifecycle.ts",
-    "src/main/core-lifecycle.test.ts"
+    "src/main/core-lifecycle.test.ts",
+    "src/shared/calibration-synthetic.ts",
+    "src/shared/calibration-synthetic.test.ts",
+    "src/shared/core-contract.ts"
   ]
 }

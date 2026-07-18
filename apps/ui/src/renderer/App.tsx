@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Power, RefreshCw, Square, Play, SlidersHorizontal } from 'lucide-react';
+import { CheckCircle2, Crosshair, Power, RefreshCw, Square, Play, SlidersHorizontal, XCircle } from 'lucide-react';
 import './styles.css';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,14 @@ import {
 } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
+import { createSyntheticCalibrationSamples } from '../shared/calibration-synthetic';
 import type {
+  CalibrationCancelResponse,
+  CalibrationCompleteResponse,
+  CalibrationMode,
+  CalibrationSamplesRequest,
+  CalibrationSession,
+  CalibrationSessionRequest,
   CoreUiSettings,
   CoreUiSettingsUpdate,
   CoreUiStatus,
@@ -28,14 +35,32 @@ declare global {
       updateSettings: (update: CoreUiSettingsUpdate) => Promise<CoreUiSettings>;
       startTracking: () => Promise<CoreUiStatus>;
       stopTracking: () => Promise<CoreUiStatus>;
+      createCalibrationSession: (request: CalibrationSessionRequest) => Promise<CalibrationSession>;
+      submitCalibrationSamples: (
+        sessionId: string,
+        request: CalibrationSamplesRequest,
+      ) => Promise<CalibrationSession>;
+      completeCalibrationSession: (sessionId: string) => Promise<CalibrationCompleteResponse>;
+      cancelCalibrationSession: (sessionId: string) => Promise<CalibrationCancelResponse>;
       quitGlance: () => Promise<ShutdownResponse>;
     };
   }
 }
 
+type CalibrationRunState = {
+  phase: 'idle' | 'initial' | 'validation' | 'drift' | 'complete' | 'cancelled';
+  session: CalibrationSession | null;
+  complete: CalibrationCompleteResponse | null;
+};
+
 function App() {
   const [status, setStatus] = useState<CoreUiStatus | null>(null);
   const [settings, setSettings] = useState<CoreUiSettings | null>(null);
+  const [calibrationRun, setCalibrationRun] = useState<CalibrationRunState>({
+    phase: 'idle',
+    session: null,
+    complete: null,
+  });
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -110,6 +135,65 @@ function App() {
     }
   }
 
+  async function runSyntheticCalibration() {
+    try {
+      setError(null);
+      const initialComplete = await collectCalibrationMode('initial-9-point', 'initial');
+      const validationComplete = await collectCalibrationMode('validation', 'validation');
+      setCalibrationRun({ phase: 'complete', session: null, complete: validationComplete });
+      setStatus(validationComplete.status);
+      if (initialComplete.profile_id !== null || !validationComplete.profile_id) {
+        throw new Error('Calibration did not produce a persisted profile');
+      }
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to complete calibration');
+    }
+  }
+
+  async function runDriftCorrection() {
+    try {
+      setError(null);
+      const complete = await collectCalibrationMode('drift-1-point', 'drift');
+      setCalibrationRun({ phase: 'complete', session: null, complete });
+      setStatus(complete.status);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to complete drift correction');
+    }
+  }
+
+  async function collectCalibrationMode(
+    mode: CalibrationMode,
+    phase: CalibrationRunState['phase'],
+  ) {
+    let session = await window.glance.createCalibrationSession({ mode, display_id: 'main' });
+    setCalibrationRun({ phase, session, complete: null });
+
+    for (const target of session.targets) {
+      session = await window.glance.submitCalibrationSamples(session.session_id, {
+        target_id: target.id,
+        samples: createSyntheticCalibrationSamples(target),
+      });
+      setCalibrationRun({ phase, session, complete: null });
+    }
+
+    return window.glance.completeCalibrationSession(session.session_id);
+  }
+
+  async function cancelCalibration() {
+    if (!calibrationRun.session) {
+      return;
+    }
+
+    try {
+      const cancelled = await window.glance.cancelCalibrationSession(calibrationRun.session.session_id);
+      setStatus(cancelled.status);
+      setCalibrationRun({ phase: 'cancelled', session: null, complete: null });
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to cancel calibration');
+    }
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <section className="mx-auto grid min-h-screen w-full max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[minmax(0,1fr)_420px] lg:px-10">
@@ -169,6 +253,78 @@ function App() {
                 label="UI runtime critical"
                 value={status?.ui.runtime_critical ? 'yes' : 'no'}
               />
+            </div>
+
+            <Separator />
+
+            <div className="space-y-5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Crosshair className="size-4" />
+                  Calibration
+                </div>
+                <Badge variant="outline" className="capitalize">
+                  {status?.calibration.state ?? 'loading'}
+                </Badge>
+              </div>
+
+              <div className="relative aspect-[16/10] overflow-hidden border border-border bg-muted">
+                {calibrationRun.session ? (
+                  <TargetPreview session={calibrationRun.session} />
+                ) : (
+                  <div className="grid h-full place-items-center px-4 text-center text-sm text-muted-foreground">
+                    {calibrationRun.complete?.profile_id ?? status?.calibration.profile_id ?? 'No profile'}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-2 text-sm">
+                <StatusRow
+                  label="Session"
+                  value={calibrationRun.session?.mode ?? calibrationRun.phase}
+                />
+                <StatusRow
+                  label="Progress"
+                  value={
+                    calibrationRun.session
+                      ? `${Math.min(calibrationRun.session.current_target_index, calibrationRun.session.targets.length)}/${calibrationRun.session.targets.length}`
+                      : '0/0'
+                  }
+                />
+                <StatusRow
+                  label="Mean error"
+                  value={
+                    calibrationRun.complete?.validation
+                      ? `${calibrationRun.complete.validation.mean_error_px.toFixed(1)} px`
+                      : 'pending'
+                  }
+                />
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" onClick={runSyntheticCalibration}>
+                  <CheckCircle2 />
+                  Calibrate
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={runDriftCorrection}
+                  disabled={status?.calibration.state !== 'valid'}
+                >
+                  <Crosshair />
+                  Drift
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={cancelCalibration}
+                  disabled={!calibrationRun.session}
+                >
+                  <XCircle />
+                  Cancel
+                </Button>
+              </div>
             </div>
 
             <Separator />
@@ -255,6 +411,30 @@ function App() {
         </Card>
       </section>
     </main>
+  );
+}
+
+function TargetPreview({ session }: { session: CalibrationSession }) {
+  const target = session.targets[Math.min(session.current_target_index, session.targets.length - 1)];
+  const left = ((target.x - target.display.x) / target.display.width) * 100;
+  const top = ((target.y - target.display.y) / target.display.height) * 100;
+
+  return (
+    <div className="relative h-full">
+      <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,var(--border)_1px,transparent_1px),linear-gradient(to_bottom,var(--border)_1px,transparent_1px)] [background-size:20%_20%]" />
+      <div
+        className="absolute size-8 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background shadow"
+        style={{ left: `${left}%`, top: `${top}%` }}
+      >
+        <span className="absolute left-1/2 top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary" />
+      </div>
+      <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+        <span>{target.id}</span>
+        <span>
+          {session.current_target_index}/{session.targets.length}
+        </span>
+      </div>
+    </div>
   );
 }
 

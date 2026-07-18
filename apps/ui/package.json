@@ -5,7 +5,7 @@
   "main": ".vite/build/main.js",
   "scripts": {
     "dev": "electron-forge start",
-    "test": "tsc -p tsconfig.test.json && node --test .tmp-test/main/*.test.js",
+    "test": "tsc -p tsconfig.test.json && node --test .tmp-test/main/*.test.js .tmp-test/shared/*.test.js",
     "typecheck": "tsc -p tsconfig.json",
     "start": "electron-forge start",
     "package": "electron-forge package",

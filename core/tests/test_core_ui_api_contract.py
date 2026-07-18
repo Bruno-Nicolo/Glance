@@ -82,6 +82,9 @@ class CoreUiApiContractTests(unittest.TestCase):
     def post(self, route: str) -> tuple[int, dict]:
         return self.request("POST", route)
 
+    def delete(self, route: str) -> tuple[int, dict]:
+        return self.request("DELETE", route)
+
     def put(self, route: str, body: dict) -> tuple[int, dict]:
         return self.request("PUT", route, body)
 
@@ -193,6 +196,128 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(stop_status, 200)
         self.assertEqual(stopped_status["tracking"]["state"], "stopped")
         self.assertEqual(stopped_status["tracking"]["input_enabled"], False)
+
+    def test_calibration_session_accepts_synthetic_samples_validates_and_persists_profile(self) -> None:
+        initial = self.create_and_collect_calibration_session("initial-9-point")
+
+        self.assertEqual([target["id"] for target in initial["targets"]], [
+            "center",
+            "top-left",
+            "top-center",
+            "top-right",
+            "middle-left",
+            "middle-right",
+            "bottom-left",
+            "bottom-center",
+            "bottom-right",
+        ])
+
+        initial_complete_status, initial_complete = self.post(
+            f"/calibration/sessions/{initial['session_id']}/complete"
+        )
+        validation = self.create_and_collect_calibration_session("validation")
+        validation_complete_status, validation_complete = self.post(
+            f"/calibration/sessions/{validation['session_id']}/complete"
+        )
+
+        profile_path = self.config_path.parent / "calibration.json"
+        persisted = json.loads(profile_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(initial_complete_status, 200)
+        self.assertEqual(initial_complete["profile_id"], None)
+        self.assertEqual(validation_complete_status, 200)
+        self.assertEqual(validation_complete["state"], "complete")
+        self.assertEqual(validation_complete["profile_id"], persisted["profile_id"])
+        self.assertEqual(validation_complete["status"]["calibration"]["state"], "valid")
+        self.assertEqual(persisted["display"]["coordinate_space"], "display-logical-top-left")
+        self.assertEqual(persisted["validation"]["accepted"], True)
+        self.assertGreater(max(abs(value) for value in persisted["regression"]["x_coefficients"]), 0)
+        self.assertGreater(max(abs(value) for value in persisted["regression"]["y_coefficients"]), 0)
+        self.assertNotIn("samples", json.dumps(persisted))
+
+        drift = self.create_and_collect_calibration_session("drift-1-point")
+        drift_complete_status, drift_complete = self.post(
+            f"/calibration/sessions/{drift['session_id']}/complete"
+        )
+        drifted = json.loads(profile_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(drift_complete_status, 200)
+        self.assertEqual(drift_complete["profile_id"], persisted["profile_id"])
+        self.assertEqual(drifted["profile_id"], persisted["profile_id"])
+        self.assertEqual(drifted["regression"], persisted["regression"])
+        self.assertEqual(drifted["drift_corrections"], 1)
+
+    def test_calibration_rejects_invalid_sample_target_without_advancing(self) -> None:
+        _create_status, session = self.request(
+            "POST",
+            "/calibration/sessions",
+            {"mode": "initial-9-point", "display_id": "main"},
+        )
+        center_target = session["targets"][0]
+
+        sample_status, body = self.request(
+            "POST",
+            f"/calibration/sessions/{session['session_id']}/samples",
+            {"target_id": "top-left", "samples": self.synthetic_samples(center_target, 0)},
+        )
+
+        self.assertEqual(sample_status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_calibration_sample")
+
+    def create_and_collect_calibration_session(self, mode: str) -> dict:
+        create_status, session = self.request(
+            "POST",
+            "/calibration/sessions",
+            {"mode": mode, "display_id": "main"},
+        )
+
+        self.assertEqual(create_status, 200)
+        self.assertEqual(session["mode"], mode)
+        self.assertEqual(session["state"], "collecting")
+
+        for index, target in enumerate(session["targets"]):
+            sample_status, session = self.request(
+                "POST",
+                f"/calibration/sessions/{session['session_id']}/samples",
+                {"target_id": target["id"], "samples": self.synthetic_samples(target, index)},
+            )
+            self.assertEqual(sample_status, 200)
+
+        return session
+
+    def synthetic_samples(self, target: dict, target_index: int) -> list[dict]:
+        x_ratio = (target["x"] - target["display"]["x"]) / target["display"]["width"]
+        y_ratio = (target["y"] - target["display"]["y"]) / target["display"]["height"]
+        samples = []
+        for sample_index in range(15):
+            offset = (sample_index % 3) * 0.0025
+            avg_x = min(1, max(0, x_ratio + offset))
+            avg_y = min(1, max(0, y_ratio - offset))
+            samples.append({
+                "sample_at_ms": 1721300000000 + (target_index * 1000) + (sample_index * 50),
+                "features": {
+                    "left_iris_x": min(1, max(0, avg_x - 0.01)),
+                    "left_iris_y": min(1, max(0, avg_y + 0.005)),
+                    "right_iris_x": min(1, max(0, avg_x + 0.01)),
+                    "right_iris_y": min(1, max(0, avg_y - 0.005)),
+                    "avg_iris_x": avg_x,
+                    "avg_iris_y": avg_y,
+                    "face_center_x": min(1, max(0, 0.5 + (x_ratio - 0.5) * 0.08)),
+                    "face_center_y": min(1, max(0, 0.5 + (y_ratio - 0.5) * 0.08)),
+                    "face_scale": 0.37,
+                    "head_yaw": (x_ratio - 0.5) * 0.08,
+                    "head_pitch": (0.5 - y_ratio) * 0.06,
+                    "head_roll": offset,
+                },
+                "quality": {
+                    "eye_openness": 0.92,
+                    "landmark_stability": 0.88,
+                    "face_stability": 0.9,
+                    "left_right_divergence": 0.04,
+                    "temporal_jitter": 0.03,
+                },
+            })
+        return samples
 
     def test_shutdown_returns_explicit_full_shutdown_semantics(self) -> None:
         status_code, body = self.post("/shutdown")

@@ -15,6 +15,11 @@ import {
   type CoreConnection,
 } from './core-lifecycle';
 import type {
+  CalibrationCancelResponse,
+  CalibrationCompleteResponse,
+  CalibrationSamplesRequest,
+  CalibrationSession,
+  CalibrationSessionRequest,
   CoreUiSettings,
   CoreUiSettingsUpdate,
   CoreUiStatus,
@@ -102,6 +107,61 @@ class CoreClient {
     return (await response.json()) as CoreUiStatus;
   }
 
+  async createCalibrationSession(request: CalibrationSessionRequest): Promise<CalibrationSession> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, '/calibration/sessions', {
+      method: 'POST',
+      body: JSON.stringify(request),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) {
+      throw new Error(`Core calibration session failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CalibrationSession;
+  }
+
+  async submitCalibrationSamples(
+    sessionId: string,
+    request: CalibrationSamplesRequest,
+  ): Promise<CalibrationSession> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, `/calibration/sessions/${sessionId}/samples`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) {
+      throw new Error(`Core calibration samples failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CalibrationSession;
+  }
+
+  async completeCalibrationSession(sessionId: string): Promise<CalibrationCompleteResponse> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, `/calibration/sessions/${sessionId}/complete`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error(`Core calibration complete failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CalibrationCompleteResponse;
+  }
+
+  async cancelCalibrationSession(sessionId: string): Promise<CalibrationCancelResponse> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, `/calibration/sessions/${sessionId}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      throw new Error(`Core calibration cancel failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CalibrationCancelResponse;
+  }
+
   async quitGlance() {
     const connection = await this.ensureConnected();
     const response = await fetchCore(connection, '/shutdown', { method: 'POST' });
@@ -174,6 +234,21 @@ app.whenReady().then(() => {
   ));
   ipcMain.handle('glance:startTracking', async () => coreClient?.startTracking());
   ipcMain.handle('glance:stopTracking', async () => coreClient?.stopTracking());
+  ipcMain.handle('glance:createCalibrationSession', async (_event, request: CalibrationSessionRequest) => (
+    coreClient?.createCalibrationSession(request)
+  ));
+  ipcMain.handle(
+    'glance:submitCalibrationSamples',
+    async (_event, sessionId: string, request: CalibrationSamplesRequest) => (
+      coreClient?.submitCalibrationSamples(sessionId, request)
+    ),
+  );
+  ipcMain.handle('glance:completeCalibrationSession', async (_event, sessionId: string) => (
+    coreClient?.completeCalibrationSession(sessionId)
+  ));
+  ipcMain.handle('glance:cancelCalibrationSession', async (_event, sessionId: string) => (
+    coreClient?.cancelCalibrationSession(sessionId)
+  ));
   ipcMain.handle('glance:quitGlance', async () => {
     await coreClient?.quitGlance();
     allowFullQuit = true;
