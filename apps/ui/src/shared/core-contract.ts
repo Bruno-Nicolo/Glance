@@ -57,3 +57,100 @@ export type ShutdownResponse = {
   scope: 'full-runtime';
   ui_should_exit: boolean;
 };
+
+export type CalibrationMode = 'initial-9-point' | 'validation' | 'drift-1-point';
+
+export type CalibrationSessionState =
+  | 'collecting'
+  | 'processing'
+  | 'complete'
+  | 'cancelled'
+  | 'error';
+
+export type CalibrationTarget = {
+  id: string;
+  x: number;
+  y: number;
+  display: {
+    id: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    scale: number;
+    coordinate_space: 'display-logical-top-left';
+  };
+};
+
+export type CalibrationSession = {
+  contract_version: number;
+  session_id: string;
+  mode: CalibrationMode;
+  state: CalibrationSessionState;
+  current_target_index: number;
+  targets: CalibrationTarget[];
+  error: CoreUiError | null;
+};
+
+export type CalibrationSessionRequest = {
+  mode: CalibrationMode;
+  display_id: 'main';
+};
+
+export type CalibrationSample = {
+  sample_at_ms: number;
+  features: {
+    left_iris_x: number;
+    left_iris_y: number;
+    right_iris_x: number;
+    right_iris_y: number;
+    avg_iris_x: number;
+    avg_iris_y: number;
+    face_center_x: number;
+    face_center_y: number;
+    face_scale: number;
+    head_yaw: number;
+    head_pitch: number;
+    head_roll: number;
+  };
+  quality: {
+    eye_openness: number;
+    landmark_stability: number;
+    face_stability: number;
+    left_right_divergence: number;
+    temporal_jitter: number;
+  };
+};
+
+export type CalibrationSamplesRequest = {
+  target_id: string;
+  samples: CalibrationSample[];
+};
+
+export type CalibrationCompleteResponse = {
+  contract_version: number;
+  session_id: string;
+  state: 'complete' | 'error';
+  mode: CalibrationMode;
+  profile_id: string | null;
+  validation: {
+    mode: 'validation-3-point' | 'validation-5-point' | 'drift-check-1-point';
+    mean_error_px: number;
+    median_error_px: number;
+    max_error_px: number;
+    accepted: boolean;
+    mean_error_threshold_px: number;
+    max_error_threshold_px: number;
+    sample_count: number;
+  } | null;
+  status: CoreUiStatus;
+  error: CoreUiError | null;
+};
+
+export type CalibrationCancelResponse = {
+  contract_version: number;
+  session_id: string;
+  state: 'cancelled';
+  status: CoreUiStatus;
+  error: CoreUiError | null;
+};

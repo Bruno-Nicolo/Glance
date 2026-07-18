@@ -146,6 +146,8 @@ Request:
         "left_iris_y": 0.51,
         "right_iris_x": 0.44,
         "right_iris_y": 0.5,
+        "avg_iris_x": 0.43,
+        "avg_iris_y": 0.505,
         "face_center_x": 0.5,
         "face_center_y": 0.48,
         "face_scale": 0.37,
@@ -169,6 +171,12 @@ Response returns the session shape from `POST /calibration/sessions` with update
 Invalid session id, target id, sample feature ranges, or cancelled/completed sessions return a
 recoverable `400 invalid_calibration_sample` error.
 
+Core stores submitted samples only in memory while the session is active. The persisted
+`calibration.json` profile contains fitted model parameters, correction nodes, display metadata,
+and validation metrics, never raw feature samples or image data. See
+[Calibration Flow and Data Model](calibration-flow-and-data-model.md) for the exact MVP 1 flow,
+profile schema, retry states, and privacy boundaries.
+
 ### `POST /calibration/sessions/{session_id}/complete`
 
 Requests Core to fit or validate the calibration and persist `calibration.json` when successful.
@@ -180,18 +188,26 @@ Response:
   "contract_version": 1,
   "session_id": "cal_01HX...",
   "state": "complete",
+  "mode": "validation",
   "profile_id": "profile_01HX...",
   "validation": {
+    "mode": "validation-5-point",
     "mean_error_px": 42.5,
+    "median_error_px": 38.25,
     "max_error_px": 91.2,
-    "accepted": true
+    "accepted": true,
+    "mean_error_threshold_px": 90,
+    "max_error_threshold_px": 160,
+    "sample_count": 240
   },
   "status": { "...": "same shape as GET /status" },
   "error": null
 }
 ```
 
-Insufficient samples or failed validation return `400 calibration_failed` with `recoverable: true`.
+For `mode: "initial-9-point"`, `validation` is `null` until a later validation session is
+accepted. Insufficient samples or failed validation return `400 calibration_failed` with
+`recoverable: true`.
 
 ### `DELETE /calibration/sessions/{session_id}`
 
