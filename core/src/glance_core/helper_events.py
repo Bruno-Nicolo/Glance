@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
+from math import cos, sin, tau
 from typing import Any, Literal
 
 HELPER_EVENT_VERSION = 1
@@ -9,6 +10,9 @@ HELPER_EVENT_MIN_VERSION = 1
 HELPER_TARGET_FPS = 30
 HELPER_FRAME_INTERVAL_MS = round(1000 / HELPER_TARGET_FPS)
 HELPER_STALE_SAMPLE_MS = 150
+SYNTHETIC_GAZE_LOOP_SECONDS = 4
+SYNTHETIC_GAZE_HORIZONTAL_RADIUS_RATIO = 0.32
+SYNTHETIC_GAZE_VERTICAL_RADIUS_RATIO = 0.28
 
 CoordinateSpace = Literal["display-logical-top-left"]
 GazeSource = Literal["synthetic", "camera"]
@@ -75,3 +79,28 @@ class TrackingStatusEvent(HelperEvent):
     overlay: OverlayState = "hidden"
     reason: str | None = None
     type: Literal["tracking.status"] = "tracking.status"
+
+
+@dataclass(frozen=True)
+class SyntheticGazePath:
+    display: DisplayBounds
+    frames_per_loop: int = HELPER_TARGET_FPS * SYNTHETIC_GAZE_LOOP_SECONDS
+
+    def sample(self, *, sequence: int, sent_at_ms: int) -> GazeSampleEvent:
+        progress = (sequence % self.frames_per_loop) / self.frames_per_loop
+        center_x = self.display.x + (self.display.width / 2)
+        center_y = self.display.y + (self.display.height / 2)
+        radius_x = self.display.width * SYNTHETIC_GAZE_HORIZONTAL_RADIUS_RATIO
+        radius_y = self.display.height * SYNTHETIC_GAZE_VERTICAL_RADIUS_RATIO
+
+        return GazeSampleEvent(
+            sent_at_ms=sent_at_ms,
+            sequence=sequence,
+            sample_at_ms=sent_at_ms,
+            x=center_x + (cos(progress * tau) * radius_x),
+            y=center_y + (sin(progress * tau) * radius_y),
+            display=self.display,
+            confidence=1.0,
+            status="valid",
+            source="synthetic",
+        )

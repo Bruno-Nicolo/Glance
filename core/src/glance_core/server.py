@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import signal
@@ -12,7 +13,14 @@ from pathlib import Path
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
-from .helper_events import CoreReadyEvent, now_ms
+from .helper_events import (
+    HELPER_FRAME_INTERVAL_MS,
+    CoreReadyEvent,
+    DisplayBounds,
+    SyntheticGazePath,
+    TrackingStatusEvent,
+    now_ms,
+)
 from .paths import runtime_dir
 from .security import is_authorized, load_or_create_token
 
@@ -84,6 +92,7 @@ class HelperProcess:
 
 def create_app(state: RuntimeState) -> FastAPI:
     helper = HelperProcess(token=state.token, port=state.port)
+    synthetic_gaze_path = SyntheticGazePath(display=synthetic_display_bounds())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -132,15 +141,46 @@ def create_app(state: RuntimeState) -> FastAPI:
 
         await websocket.accept()
         try:
+            sequence = 0
             await websocket.send_json(
-                CoreReadyEvent(sent_at_ms=now_ms(), sequence=0).to_json_dict()
+                CoreReadyEvent(sent_at_ms=now_ms(), sequence=sequence).to_json_dict()
             )
+            sequence += 1
+            await websocket.send_json(
+                TrackingStatusEvent(
+                    sent_at_ms=now_ms(),
+                    sequence=sequence,
+                    tracking="running",
+                    overlay="visible",
+                    reason="synthetic-startup",
+                ).to_json_dict()
+            )
+            sequence += 1
             while True:
-                await websocket.receive_text()
+                sent_at_ms = now_ms()
+                await websocket.send_json(
+                    synthetic_gaze_path.sample(
+                        sequence=sequence,
+                        sent_at_ms=sent_at_ms,
+                    ).to_json_dict()
+                )
+                sequence += 1
+                await asyncio.sleep(HELPER_FRAME_INTERVAL_MS / 1000)
         except WebSocketDisconnect:
             return
 
     return app
+
+
+def synthetic_display_bounds() -> DisplayBounds:
+    return DisplayBounds(
+        id=os.environ.get("GLANCE_SYNTHETIC_DISPLAY_ID", "main"),
+        x=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_X", "0")),
+        y=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_Y", "0")),
+        width=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_WIDTH", "1440")),
+        height=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_HEIGHT", "900")),
+        scale=float(os.environ.get("GLANCE_SYNTHETIC_DISPLAY_SCALE", "2")),
+    )
 
 
 def find_available_port() -> int:

@@ -122,6 +122,7 @@ struct TrackingStatusEvent: Decodable {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlayWindow: NSWindow?
+    private var overlayView: CursorOverlayView?
     private var coreSocket: CoreSocket?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -145,7 +146,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.ignoresMouseEvents = true
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        window.contentView = CursorOverlayView(frame: screen.frame)
+        let cursorView = CursorOverlayView(frame: screen.frame)
+        window.contentView = cursorView
+        overlayView = cursorView
         window.orderFrontRegardless()
         overlayWindow = window
     }
@@ -160,17 +163,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        coreSocket = CoreSocket(url: url, token: token)
+        coreSocket = CoreSocket(
+            url: url,
+            token: token,
+            onGazeSample: { [weak self] event in
+                self?.overlayView?.apply(gazeSample: event)
+            },
+            onTrackingStatus: { [weak self] event in
+                self?.overlayView?.apply(trackingStatus: event)
+            }
+        )
         coreSocket?.connect()
     }
 }
 
 final class CursorOverlayView: NSView {
     private var cursorPosition: CGPoint = CGPoint(x: 200, y: 200)
+    private var overlayState: String = "visible"
 
     override var isFlipped: Bool { true }
 
+    func apply(gazeSample event: GazeSampleEvent) {
+        guard overlayState == "visible" else { return }
+        guard event.status == "valid" || event.status == "low-confidence" else { return }
+        guard !Self.isStale(gazeSample: event) else { return }
+
+        let localPoint = CGPoint(
+            x: event.x - event.display.x,
+            y: event.y - event.display.y
+        )
+        cursorPosition = CGPoint(
+            x: min(max(localPoint.x, bounds.minX), bounds.maxX),
+            y: min(max(localPoint.y, bounds.minY), bounds.maxY)
+        )
+        needsDisplay = true
+    }
+
+    func apply(trackingStatus event: TrackingStatusEvent) {
+        overlayState = event.overlay
+        isHidden = event.overlay == "hidden"
+    }
+
+    private static func isStale(gazeSample event: GazeSampleEvent) -> Bool {
+        let nowMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
+        return nowMilliseconds - event.sampleAtMilliseconds
+            > HelperEventContract.staleSampleMilliseconds
+    }
+
     override func draw(_ dirtyRect: NSRect) {
+        guard overlayState != "hidden" else { return }
+
         NSColor.clear.setFill()
         dirtyRect.fill()
 
@@ -189,12 +231,21 @@ final class CursorOverlayView: NSView {
 final class CoreSocket {
     private let url: URL
     private let token: String
+    private let onGazeSample: (GazeSampleEvent) -> Void
+    private let onTrackingStatus: (TrackingStatusEvent) -> Void
     private var task: URLSessionWebSocketTask?
     private let decoder = JSONDecoder()
 
-    init(url: URL, token: String) {
+    init(
+        url: URL,
+        token: String,
+        onGazeSample: @escaping (GazeSampleEvent) -> Void,
+        onTrackingStatus: @escaping (TrackingStatusEvent) -> Void
+    ) {
         self.url = url
         self.token = token
+        self.onGazeSample = onGazeSample
+        self.onTrackingStatus = onTrackingStatus
     }
 
     func connect() {
@@ -246,11 +297,17 @@ final class CoreSocket {
                     print("GlanceHelper ignored invalid gaze.sample event")
                     return
                 }
+                DispatchQueue.main.async { [onGazeSample] in
+                    onGazeSample(event)
+                }
             case "tracking.status":
                 let event = try decoder.decode(TrackingStatusEvent.self, from: data)
                 guard isValid(trackingStatus: event) else {
                     print("GlanceHelper ignored invalid tracking.status event")
                     return
+                }
+                DispatchQueue.main.async { [onTrackingStatus] in
+                    onTrackingStatus(event)
                 }
             default:
                 print("GlanceHelper ignored unknown event type \(envelope.type)")
@@ -276,7 +333,8 @@ final class CoreSocket {
             event.confidence.isFinite,
             (0...1).contains(event.confidence),
             HelperEventContract.gazeStatuses.contains(event.status),
-            HelperEventContract.gazeSources.contains(event.source)
+            HelperEventContract.gazeSources.contains(event.source),
+            !isStale(gazeSample: event)
         else {
             return false
         }
@@ -291,6 +349,12 @@ final class CoreSocket {
     private func isValid(trackingStatus event: TrackingStatusEvent) -> Bool {
         HelperEventContract.trackingStates.contains(event.tracking)
             && HelperEventContract.overlayStates.contains(event.overlay)
+    }
+
+    private func isStale(gazeSample event: GazeSampleEvent) -> Bool {
+        let nowMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
+        return nowMilliseconds - event.sampleAtMilliseconds
+            > HelperEventContract.staleSampleMilliseconds
     }
 }
 

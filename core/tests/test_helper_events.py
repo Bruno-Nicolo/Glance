@@ -9,6 +9,7 @@ from glance_core.helper_events import (
     CoreReadyEvent,
     DisplayBounds,
     GazeSampleEvent,
+    SyntheticGazePath,
     TrackingStatusEvent,
 )
 
@@ -65,6 +66,37 @@ class HelperEventContractTests(unittest.TestCase):
         self.assertEqual(payload["tracking"], "paused")
         self.assertEqual(payload["overlay"], "frozen")
         self.assertEqual(payload["reason"], "esc-held")
+
+    def test_synthetic_gaze_path_emits_valid_looping_screen_samples(self) -> None:
+        display = DisplayBounds(
+            id="main",
+            x=0,
+            y=0,
+            width=1000,
+            height=500,
+            scale=2,
+        )
+        path = SyntheticGazePath(display=display, frames_per_loop=4)
+
+        right = path.sample(sequence=0, sent_at_ms=2000).to_json_dict()
+        bottom = path.sample(sequence=1, sent_at_ms=2033).to_json_dict()
+        left = path.sample(sequence=2, sent_at_ms=2066).to_json_dict()
+        top = path.sample(sequence=3, sent_at_ms=2099).to_json_dict()
+
+        self.assertEqual(right["type"], "gaze.sample")
+        self.assertEqual(right["sample_at_ms"], 2000)
+        self.assertEqual(right["confidence"], 1.0)
+        self.assertEqual(right["status"], "valid")
+        self.assertEqual(right["source"], "synthetic")
+        self.assertEqual(right["display"]["coordinate_space"], "display-logical-top-left")
+        self.assertEqual(right["x"], 820.0)
+        self.assertEqual(right["y"], 250.0)
+        self.assertAlmostEqual(bottom["x"], 500.0)
+        self.assertEqual(bottom["y"], 390.0)
+        self.assertEqual(left["x"], 180.0)
+        self.assertAlmostEqual(left["y"], 250.0)
+        self.assertAlmostEqual(top["x"], 500.0)
+        self.assertEqual(top["y"], 110.0)
 
 
 if __name__ == "__main__":
