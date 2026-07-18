@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Power, RefreshCw, Square, Play } from 'lucide-react';
+import { Power, RefreshCw, Square, Play, SlidersHorizontal } from 'lucide-react';
 import './styles.css';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -82,10 +82,28 @@ function App() {
   }
 
   async function toggleSpaceClick(enabled: boolean) {
+    await updateSettings({ input: { space_click_enabled: enabled } });
+  }
+
+  async function toggleSyntheticGaze(enabled: boolean) {
+    await updateSettings({ debug: { synthetic_gaze_enabled: enabled } });
+  }
+
+  async function setPauseBehavior(pause_behavior: CoreUiSettings['tracking']['pause_behavior']) {
+    await updateSettings({ tracking: { pause_behavior } });
+  }
+
+  async function setConfidenceThreshold(confidence_threshold: number) {
+    await updateSettings({ tracking: { confidence_threshold } });
+  }
+
+  async function setSmoothing(smoothing: number) {
+    await updateSettings({ tracking: { smoothing } });
+  }
+
+  async function updateSettings(update: CoreUiSettingsUpdate) {
     try {
-      setSettings(await window.glance.updateSettings({
-        input: { space_click_enabled: enabled },
-      }));
+      setSettings(await window.glance.updateSettings(update));
       setError(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to update settings');
@@ -147,11 +165,46 @@ function App() {
                 label="Input"
                 value={status?.tracking.input_enabled ? 'enabled' : 'disabled'}
               />
+              <StatusRow
+                label="UI runtime critical"
+                value={status?.ui.runtime_critical ? 'yes' : 'no'}
+              />
             </div>
 
             <Separator />
 
-            <div className="space-y-4">
+            <div className="space-y-5">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <SlidersHorizontal className="size-4" />
+                Settings
+              </div>
+
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Pause behavior</span>
+                <select
+                  className="h-10 border border-input bg-background px-3 text-sm"
+                  value={settings?.tracking.pause_behavior ?? 'fast-recovery'}
+                  onChange={(event) => {
+                    void setPauseBehavior(event.target.value as CoreUiSettings['tracking']['pause_behavior']);
+                  }}
+                >
+                  <option value="fast-recovery">Fast recovery</option>
+                  <option value="privacy-low-power">Privacy / low power</option>
+                </select>
+              </label>
+
+              <SliderSetting
+                label="Confidence threshold"
+                value={settings?.tracking.confidence_threshold ?? 0.6}
+                onChange={setConfidenceThreshold}
+              />
+
+              <SliderSetting
+                label="Smoothing"
+                value={settings?.tracking.smoothing ?? 0.5}
+                onChange={setSmoothing}
+              />
+
               <div className="flex items-center justify-between gap-4">
                 <div className="space-y-1">
                   <p className="text-sm font-medium">Space click</p>
@@ -161,6 +214,18 @@ function App() {
                   checked={settings?.input.space_click_enabled ?? false}
                   onCheckedChange={toggleSpaceClick}
                   aria-label="Toggle Space click"
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">Synthetic gaze</p>
+                  <p className="text-sm text-muted-foreground">Debug gaze source owned by Core.</p>
+                </div>
+                <Switch
+                  checked={settings?.debug.synthetic_gaze_enabled ?? false}
+                  onCheckedChange={toggleSyntheticGaze}
+                  aria-label="Toggle synthetic gaze"
                 />
               </div>
 
@@ -210,6 +275,36 @@ function StatusRow({ label, value }: { label: string; value: string }) {
         {value}
       </Badge>
     </div>
+  );
+}
+
+function SliderSetting({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => Promise<void>;
+}) {
+  return (
+    <label className="grid gap-2 text-sm">
+      <span className="flex items-center justify-between gap-3">
+        <span className="font-medium">{label}</span>
+        <span className="tabular-nums text-muted-foreground">{value.toFixed(2)}</span>
+      </span>
+      <input
+        className="w-full accent-primary"
+        min={0}
+        max={1}
+        step={0.05}
+        type="range"
+        value={value}
+        onChange={(event) => {
+          void onChange(Number(event.target.value));
+        }}
+      />
+    </label>
   );
 }
 

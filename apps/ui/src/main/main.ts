@@ -1,10 +1,19 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
-import fsp from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
+import {
+  cleanStaleRuntimeMarkers,
+  defaultRuntimePath,
+  fetchCore,
+  findRepoRoot,
+  isCoreHealthy,
+  readCoreConnection,
+  shouldKeepRuntimeAliveOnUiQuit,
+  startCoreProcess,
+  waitForHealthyCore,
+  type CoreConnection,
+} from './core-lifecycle';
 import type {
   CoreUiSettings,
   CoreUiSettingsUpdate,
@@ -16,79 +25,7 @@ let mainWindow: BrowserWindow | null = null;
 let coreClient: CoreClient | null = null;
 let allowFullQuit = false;
 
-type CoreConnection = {
-  port: number;
-  token: string;
-};
-
-const runtimePath = path.join(
-  os.homedir(),
-  'Library',
-  'Application Support',
-  'Glance',
-  'runtime',
-);
-
-function findRepoRoot() {
-  const candidates = [process.cwd(), app.getAppPath(), __dirname];
-
-  for (const candidate of candidates) {
-    let current = candidate;
-    for (let depth = 0; depth < 8; depth += 1) {
-      if (fs.existsSync(path.join(current, 'core', 'pyproject.toml'))) {
-        return current;
-      }
-
-      const parent = path.dirname(current);
-      if (parent === current) {
-        break;
-      }
-      current = parent;
-    }
-  }
-
-  return path.resolve(app.getAppPath(), '../..');
-}
-
-async function readCoreConnection(): Promise<CoreConnection | null> {
-  try {
-    const [portText, token] = await Promise.all([
-      fsp.readFile(path.join(runtimePath, 'core.port'), 'utf8'),
-      fsp.readFile(path.join(runtimePath, 'core.token'), 'utf8'),
-    ]);
-
-    const port = Number.parseInt(portText.trim(), 10);
-    if (!Number.isInteger(port) || port <= 0) {
-      return null;
-    }
-
-    return { port, token: token.trim() };
-  } catch {
-    return null;
-  }
-}
-
-async function fetchCore(
-  connection: CoreConnection,
-  route: string,
-  init: RequestInit = {},
-) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 900);
-
-  try {
-    return await fetch(`http://127.0.0.1:${connection.port}${route}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${connection.token}`,
-        ...(init.headers ?? {}),
-      },
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+const runtimePath = defaultRuntimePath();
 
 class CoreClient {
   private connection: CoreConnection | null = null;
@@ -96,15 +33,16 @@ class CoreClient {
   private events: WebSocket | null = null;
 
   async ensureConnected() {
-    const existing = await readCoreConnection();
-    if (existing && (await this.isHealthy(existing))) {
+    const existing = await readCoreConnection(runtimePath);
+    if (existing && (await isCoreHealthy(existing))) {
       this.connection = existing;
       this.openEvents(existing);
       return existing;
     }
 
+    await cleanStaleRuntimeMarkers(runtimePath);
     this.startCore();
-    const started = await this.waitForCore();
+    const started = await waitForHealthyCore({ runtimePath });
     this.connection = started;
     this.openEvents(started);
     return started;
@@ -174,33 +112,13 @@ class CoreClient {
     return (await response.json()) as ShutdownResponse;
   }
 
-  private async isHealthy(connection: CoreConnection) {
-    try {
-      const response = await fetchCore(connection, '/health');
-      return response.ok;
-    } catch {
-      return false;
-    }
-  }
-
   private startCore() {
     if (this.process) {
       return;
     }
 
-    const repoRoot = findRepoRoot();
-    const venvPython = path.join(repoRoot, '.venv', 'bin', 'python');
-    const python = fs.existsSync(venvPython) ? venvPython : 'python3';
-
-    const child = spawn(python, ['-m', 'glance_core'], {
-      cwd: repoRoot,
-      detached: true,
-      env: {
-        ...process.env,
-        PYTHONPATH: path.join(repoRoot, 'core', 'src'),
-      },
-      stdio: 'ignore',
-    });
+    const repoRoot = findRepoRoot([process.cwd(), app.getAppPath(), __dirname]);
+    const child = startCoreProcess(repoRoot, spawn);
 
     this.process = child;
     child.once('exit', () => {
@@ -208,21 +126,6 @@ class CoreClient {
       this.connection = null;
     });
     child.unref();
-  }
-
-  private async waitForCore() {
-    const deadline = Date.now() + 10_000;
-
-    while (Date.now() < deadline) {
-      const connection = await readCoreConnection();
-      if (connection && (await this.isHealthy(connection))) {
-        return connection;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-
-    throw new Error('Timed out waiting for Glance Core');
   }
 
   private openEvents(connection: CoreConnection) {
@@ -287,7 +190,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  if (process.platform === 'darwin' && !allowFullQuit) {
+  if (shouldKeepRuntimeAliveOnUiQuit(process.platform, allowFullQuit)) {
     event.preventDefault();
     mainWindow?.close();
   }

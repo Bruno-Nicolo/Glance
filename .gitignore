@@ -4,6 +4,7 @@ dist/
 out/
 build/
 .vite/
+.tmp-test/
 
 .venv/
 __pycache__/
