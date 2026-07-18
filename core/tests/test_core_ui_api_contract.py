@@ -32,6 +32,7 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.previous_disable_helper = os.environ.get("GLANCE_DISABLE_HELPER")
         os.environ["GLANCE_DISABLE_HELPER"] = "1"
         self.addCleanup(self._restore_helper_environment)
+        FakeCameraSampleProvider.closed_count = 0
         self.port = self._find_available_port()
         app = create_app(
             RuntimeState(
@@ -470,8 +471,154 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(status["gaze"]["source"], "camera")
         self.assertEqual(status["gaze"]["status"], "valid")
 
+    def test_helper_websocket_updates_latest_input_debug_status(self) -> None:
+        start_status, _start_body = self.post("/controls/start")
+
+        async def send_pause_events() -> None:
+            async with websockets.connect(
+                f"ws://127.0.0.1:{self.port}/events",
+                additional_headers=self.headers,
+                proxy=None,
+            ) as websocket:
+                await websocket.recv()
+                await websocket.recv()
+                await websocket.send(json.dumps({
+                    "type": "helper.input",
+                    "version": 1,
+                    "sent_at_ms": 1760000000600,
+                    "sequence": 21,
+                    "action": "pause-started",
+                    "cursor": None,
+                    "suppressed_reason": None,
+                }))
+                await websocket.send(json.dumps({
+                    "type": "helper.permission",
+                    "version": 1,
+                    "sent_at_ms": 1760000000610,
+                    "sequence": 22,
+                    "permission": "accessibility",
+                    "state": "denied",
+                    "required_for": ["space-click"],
+                    "recoverable": True,
+                }))
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    _status_code, status = self.get("/status")
+                    if (
+                        status["helper"]["input"]["paused"]
+                        and status["helper"]["input"]["permissions"]["accessibility"] == "denied"
+                    ):
+                        return
+                    await asyncio.sleep(0.05)
+                self.fail("Timed out waiting for helper input status")
+
+        asyncio.run(send_pause_events())
+        _status_code, status = self.get("/status")
+
+        self.assertEqual(start_status, 200)
+        self.assertEqual(status["tracking"]["state"], "paused")
+        self.assertEqual(status["tracking"]["input_enabled"], False)
+        self.assertEqual(status["helper"]["input"]["latest_action"], "pause-started")
+        self.assertEqual(status["helper"]["input"]["latest_suppressed_reason"], None)
+        self.assertEqual(status["helper"]["input"]["paused"], True)
+        self.assertEqual(status["helper"]["input"]["permissions"]["accessibility"], "denied")
+
+    def test_helper_websocket_pause_end_restores_previous_tracking_state(self) -> None:
+        start_status, _start_body = self.post("/controls/start")
+
+        async def send_pause_cycle() -> None:
+            async with websockets.connect(
+                f"ws://127.0.0.1:{self.port}/events",
+                additional_headers=self.headers,
+                proxy=None,
+            ) as websocket:
+                await websocket.recv()
+                await websocket.recv()
+                await websocket.send(json.dumps({
+                    "type": "helper.input",
+                    "version": 1,
+                    "sent_at_ms": 1760000000600,
+                    "sequence": 21,
+                    "action": "pause-started",
+                    "cursor": None,
+                    "suppressed_reason": None,
+                }))
+                await websocket.send(json.dumps({
+                    "type": "helper.input",
+                    "version": 1,
+                    "sent_at_ms": 1760000000700,
+                    "sequence": 22,
+                    "action": "pause-ended",
+                    "cursor": None,
+                    "suppressed_reason": None,
+                }))
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    _status_code, status = self.get("/status")
+                    if status["helper"]["input"]["latest_action"] == "pause-ended":
+                        return
+                    await asyncio.sleep(0.05)
+                self.fail("Timed out waiting for helper pause-ended status")
+
+        asyncio.run(send_pause_cycle())
+        _status_code, status = self.get("/status")
+
+        self.assertEqual(start_status, 200)
+        self.assertEqual(status["tracking"]["state"], "running")
+        self.assertEqual(status["tracking"]["input_enabled"], True)
+        self.assertEqual(status["helper"]["input"]["latest_action"], "pause-ended")
+        self.assertEqual(status["helper"]["input"]["paused"], False)
+
+    def test_helper_esc_pause_closes_camera_for_privacy_low_power(self) -> None:
+        put_status, _put_body = self.put(
+            "/settings",
+            {
+                "debug": {"synthetic_gaze_enabled": False},
+                "tracking": {"pause_behavior": "privacy-low-power"},
+            },
+        )
+        start_status, _start_body = self.post("/controls/start")
+
+        async def stream_camera_then_pause() -> None:
+            async with websockets.connect(
+                f"ws://127.0.0.1:{self.port}/events",
+                additional_headers=self.headers,
+                proxy=None,
+            ) as websocket:
+                await websocket.recv()
+                await websocket.recv()
+                sample = json.loads(await asyncio.wait_for(websocket.recv(), timeout=2))
+                self.assertEqual(sample["type"], "gaze.sample")
+                await websocket.send(json.dumps({
+                    "type": "helper.input",
+                    "version": 1,
+                    "sent_at_ms": 1760000000600,
+                    "sequence": 21,
+                    "action": "pause-started",
+                    "cursor": None,
+                    "suppressed_reason": None,
+                }))
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    _status_code, status = self.get("/status")
+                    if status["tracking"]["state"] == "paused":
+                        return
+                    await asyncio.sleep(0.05)
+                self.fail("Timed out waiting for privacy pause status")
+
+        asyncio.run(stream_camera_then_pause())
+        _status_code, status = self.get("/status")
+
+        self.assertEqual(put_status, 200)
+        self.assertEqual(start_status, 200)
+        self.assertEqual(status["tracking"]["state"], "paused")
+        self.assertEqual(status["camera"], {"state": "stopped", "active": False, "metrics": None})
+        self.assertEqual(FakeCameraSampleProvider.closed_count, 1)
+
 
 class FakeCameraSampleProvider:
+    closed_count = 0
+
     def __init__(self) -> None:
         self.metrics = CameraGazeMetrics(started_at_ms=int(time.time() * 1000))
 
@@ -492,7 +639,7 @@ class FakeCameraSampleProvider:
         )
 
     def close(self) -> None:
-        return None
+        FakeCameraSampleProvider.closed_count += 1
 
 
 if __name__ == "__main__":

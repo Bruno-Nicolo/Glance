@@ -52,6 +52,7 @@ from .ui_contract import (
     CORE_UI_CONTRACT_VERSION,
     ContractError,
     CoreUiStatus,
+    HelperInputDebug,
     SettingsValidationError,
     apply_settings_update,
     load_settings,
@@ -147,11 +148,13 @@ def create_app(
     calibration_store = CalibrationSessionStore(calibration_profile_path(settings_path))
     settings = load_settings(settings_path)
     tracking_state = "stopped"
+    previous_tracking_state_before_pause = "stopped"
     camera_state = "stopped"
     camera_error: str | None = None
     camera_provider: CameraSampleProvider | None = None
     previous_camera_output: tuple[float, float] | None = None
     last_camera_gaze: GazeMappingDebug | None = None
+    helper_input = HelperInputDebug()
     ui_event_clients: set[WebSocket] = set()
 
     @asynccontextmanager
@@ -192,6 +195,7 @@ def create_app(
             tracking_state=tracking_state,
             input_enabled=tracking_state == "running" and settings.input.space_click_enabled,
             gaze=gaze,
+            helper_input=helper_input,
             camera_state=camera_state if not synthetic_enabled else "stopped",
             camera_active=camera_active,
             camera_metrics=(
@@ -248,6 +252,93 @@ def create_app(
                 disconnected.append(client)
         for client in disconnected:
             ui_event_clients.discard(client)
+
+    async def apply_helper_message(payload: dict[str, object]) -> TrackingStatusEvent | None:
+        nonlocal camera_provider, camera_state, helper_input, previous_camera_output
+        nonlocal tracking_state, previous_tracking_state_before_pause
+
+        message_type = payload.get("type")
+        if message_type == "helper.input":
+            action = payload.get("action")
+            suppressed_reason = payload.get("suppressed_reason")
+            if action not in {
+                "space-down",
+                "space-up",
+                "space-click",
+                "esc-down",
+                "esc-up",
+                "pause-started",
+                "pause-ended",
+            }:
+                return None
+            if suppressed_reason not in {
+                None,
+                "disabled",
+                "paused",
+                "permission-denied",
+                "repeat",
+                "no-cursor",
+            }:
+                return None
+
+            paused = helper_input.paused
+            response: TrackingStatusEvent | None = None
+            if action == "pause-started":
+                if tracking_state != "paused":
+                    previous_tracking_state_before_pause = tracking_state
+                tracking_state = "paused"
+                paused = True
+                if settings.tracking.pause_behavior == "privacy-low-power":
+                    close_camera_provider(camera_provider)
+                    camera_provider = None
+                    camera_state = "stopped"
+                    previous_camera_output = None
+                response = TrackingStatusEvent(
+                    sent_at_ms=now_ms(),
+                    sequence=int(payload.get("sequence", 0)),
+                    tracking="paused",
+                    overlay="frozen" if settings.tracking.pause_behavior == "fast-recovery" else "hidden",
+                    reason="esc-held",
+                )
+            elif action == "pause-ended":
+                tracking_state = previous_tracking_state_before_pause
+                paused = False
+                response = TrackingStatusEvent(
+                    sent_at_ms=now_ms(),
+                    sequence=int(payload.get("sequence", 0)),
+                    tracking=tracking_state,
+                    overlay="visible" if tracking_state == "running" else "hidden",
+                    reason="esc-released",
+                )
+
+            helper_input = HelperInputDebug(
+                latest_action=action,
+                latest_suppressed_reason=suppressed_reason,
+                paused=paused,
+                permissions=helper_input.permissions,
+            )
+            await broadcast_status_changed()
+            return response
+
+        if message_type == "helper.permission":
+            permission = payload.get("permission")
+            state_value = payload.get("state")
+            if permission not in {"accessibility", "input-monitoring"}:
+                return None
+            if state_value not in {"granted", "denied", "unknown"}:
+                return None
+
+            permissions = {**helper_input.permissions, str(permission).replace("-", "_"): state_value}
+            helper_input = HelperInputDebug(
+                latest_action=helper_input.latest_action,
+                latest_suppressed_reason=helper_input.latest_suppressed_reason,
+                paused=helper_input.paused,
+                permissions=permissions,
+            )
+            await broadcast_status_changed()
+            return None
+
+        return None
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_request: Request, exception: HTTPException):
@@ -476,6 +567,14 @@ def create_app(
             )
             sequence += 1
             while True:
+                try:
+                    helper_message = await asyncio.wait_for(websocket.receive_json(), timeout=0.001)
+                    if isinstance(helper_message, dict):
+                        response = await apply_helper_message(helper_message)
+                        if response is not None:
+                            await websocket.send_json(response.to_json_dict())
+                except TimeoutError:
+                    pass
                 sent_at_ms = now_ms()
                 if settings.debug.synthetic_gaze_enabled:
                     await websocket.send_json(
