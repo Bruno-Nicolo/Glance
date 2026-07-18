@@ -5,16 +5,16 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
+import type {
+  CoreUiSettings,
+  CoreUiSettingsUpdate,
+  CoreUiStatus,
+  ShutdownResponse,
+} from '../shared/core-contract';
 
 let mainWindow: BrowserWindow | null = null;
 let coreClient: CoreClient | null = null;
 let allowFullQuit = false;
-
-type CoreStatus = {
-  core: string;
-  helper: string;
-  tracking: string;
-};
 
 type CoreConnection = {
   port: number;
@@ -110,19 +110,68 @@ class CoreClient {
     return started;
   }
 
-  async getStatus(): Promise<CoreStatus> {
+  async getStatus(): Promise<CoreUiStatus> {
     const connection = await this.ensureConnected();
     const response = await fetchCore(connection, '/status');
     if (!response.ok) {
       throw new Error(`Core status failed with ${response.status}`);
     }
 
-    return (await response.json()) as CoreStatus;
+    return (await response.json()) as CoreUiStatus;
+  }
+
+  async getSettings(): Promise<CoreUiSettings> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, '/settings');
+    if (!response.ok) {
+      throw new Error(`Core settings failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CoreUiSettings;
+  }
+
+  async updateSettings(update: CoreUiSettingsUpdate): Promise<CoreUiSettings> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, '/settings', {
+      method: 'PUT',
+      body: JSON.stringify(update),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) {
+      throw new Error(`Core settings update failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CoreUiSettings;
+  }
+
+  async startTracking(): Promise<CoreUiStatus> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, '/controls/start', { method: 'POST' });
+    if (!response.ok) {
+      throw new Error(`Core start failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CoreUiStatus;
+  }
+
+  async stopTracking(): Promise<CoreUiStatus> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, '/controls/stop', { method: 'POST' });
+    if (!response.ok) {
+      throw new Error(`Core stop failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CoreUiStatus;
   }
 
   async quitGlance() {
     const connection = await this.ensureConnected();
-    await fetchCore(connection, '/shutdown', { method: 'POST' });
+    const response = await fetchCore(connection, '/shutdown', { method: 'POST' });
+    if (!response.ok) {
+      throw new Error(`Core shutdown failed with ${response.status}`);
+    }
+
+    return (await response.json()) as ShutdownResponse;
   }
 
   private async isHealthy(connection: CoreConnection) {
@@ -181,7 +230,7 @@ class CoreClient {
       return;
     }
 
-    this.events = new WebSocket(`ws://127.0.0.1:${connection.port}/events`, {
+    this.events = new WebSocket(`ws://127.0.0.1:${connection.port}/ui/events`, {
       headers: { Authorization: `Bearer ${connection.token}` },
     });
 
@@ -216,6 +265,12 @@ app.whenReady().then(() => {
   coreClient = new CoreClient();
 
   ipcMain.handle('glance:getStatus', async () => coreClient?.getStatus());
+  ipcMain.handle('glance:getSettings', async () => coreClient?.getSettings());
+  ipcMain.handle('glance:updateSettings', async (_event, update: CoreUiSettingsUpdate) => (
+    coreClient?.updateSettings(update)
+  ));
+  ipcMain.handle('glance:startTracking', async () => coreClient?.startTracking());
+  ipcMain.handle('glance:stopTracking', async () => coreClient?.stopTracking());
   ipcMain.handle('glance:quitGlance', async () => {
     await coreClient?.quitGlance();
     allowFullQuit = true;

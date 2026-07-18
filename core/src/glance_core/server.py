@@ -6,12 +6,22 @@ import shlex
 import signal
 import socket
 import subprocess
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import JSONResponse
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
 from .helper_events import (
     HELPER_FRAME_INTERVAL_MS,
@@ -21,14 +31,25 @@ from .helper_events import (
     TrackingStatusEvent,
     now_ms,
 )
-from .paths import runtime_dir
+from .paths import application_support_dir, runtime_dir
 from .security import is_authorized, load_or_create_token
+from .ui_contract import (
+    CORE_UI_CONTRACT_VERSION,
+    ContractError,
+    CoreUiStatus,
+    SettingsValidationError,
+    apply_settings_update,
+    load_settings,
+    save_settings,
+)
 
 
 @dataclass(frozen=True)
 class RuntimeState:
     token: str
     port: int
+    config_path: Path | None = None
+    runtime_path: Path | None = None
 
 
 class HelperProcess:
@@ -90,13 +111,20 @@ class HelperProcess:
             self.process.kill()
 
 
-def create_app(state: RuntimeState) -> FastAPI:
+def create_app(
+    state: RuntimeState,
+    shutdown_callback: Callable[[], None] | None = None,
+) -> FastAPI:
     helper = HelperProcess(token=state.token, port=state.port)
     synthetic_gaze_path = SyntheticGazePath(display=synthetic_display_bounds())
+    settings_path = state.config_path or (application_support_config_path())
+    settings = load_settings(settings_path)
+    tracking_state = "stopped"
+    ui_event_clients: set[WebSocket] = set()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        runtime = runtime_dir()
+        runtime = ensure_runtime_path(state.runtime_path) if state.runtime_path else runtime_dir()
         (runtime / "core.pid").write_text(str(os.getpid()), encoding="utf-8")
         (runtime / "core.port").write_text(str(state.port), encoding="utf-8")
         helper.start()
@@ -107,21 +135,112 @@ def create_app(state: RuntimeState) -> FastAPI:
 
     def require_auth(authorization: str | None) -> None:
         if not is_authorized(authorization, state.token):
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            raise HTTPException(
+                status_code=401,
+                detail=ContractError(
+                    code="unauthorized",
+                    message="Missing or invalid bearer token",
+                    recoverable=True,
+                ).to_response(),
+            )
+
+    def current_status() -> CoreUiStatus:
+        return CoreUiStatus(
+            pid=os.getpid() if state.runtime_path is None else None,
+            helper_state=helper.status,
+            tracking_state=tracking_state,
+            input_enabled=tracking_state == "running" and settings.input.space_click_enabled,
+        )
+
+    def status_changed_event() -> dict[str, object]:
+        return {
+            "type": "status.changed",
+            "contract_version": CORE_UI_CONTRACT_VERSION,
+            "status": current_status().to_json_dict(),
+        }
+
+    async def broadcast_status_changed() -> None:
+        disconnected: list[WebSocket] = []
+        for client in ui_event_clients:
+            try:
+                await client.send_json(status_changed_event())
+            except RuntimeError:
+                disconnected.append(client)
+        for client in disconnected:
+            ui_event_clients.discard(client)
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(_request: Request, exception: HTTPException):
+        if isinstance(exception.detail, dict) and "error" in exception.detail:
+            return JSONResponse(status_code=exception.status_code, content=exception.detail)
+        return JSONResponse(
+            status_code=exception.status_code,
+            content=ContractError(
+                code="http_error",
+                message=str(exception.detail),
+                recoverable=exception.status_code < 500,
+            ).to_response(),
+        )
 
     @app.get("/health")
     async def health(authorization: str | None = Header(default=None)):
         require_auth(authorization)
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "contract": "core-ui",
+            "contract_version": CORE_UI_CONTRACT_VERSION,
+        }
 
     @app.get("/status")
     async def status(authorization: str | None = Header(default=None)):
         require_auth(authorization)
-        return {
-            "core": "running",
-            "helper": helper.status,
-            "tracking": "stopped",
-        }
+        return current_status().to_json_dict()
+
+    @app.get("/settings")
+    async def get_settings(authorization: str | None = Header(default=None)):
+        require_auth(authorization)
+        return settings.to_json_dict()
+
+    @app.put("/settings")
+    async def put_settings(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        nonlocal settings
+        require_auth(authorization)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise SettingsValidationError("Settings update must be an object")
+            settings = apply_settings_update(settings, payload)
+            save_settings(settings_path, settings)
+        except SettingsValidationError as error:
+            return JSONResponse(
+                status_code=400,
+                content=ContractError(
+                    code="invalid_settings",
+                    message=str(error),
+                    recoverable=True,
+                ).to_response(),
+            )
+        await broadcast_status_changed()
+        return settings.to_json_dict()
+
+    @app.post("/controls/start")
+    async def start_tracking(authorization: str | None = Header(default=None)):
+        nonlocal tracking_state
+        require_auth(authorization)
+        tracking_state = "running"
+        await broadcast_status_changed()
+        return current_status().to_json_dict()
+
+    @app.post("/controls/stop")
+    async def stop_tracking(authorization: str | None = Header(default=None)):
+        nonlocal tracking_state
+        require_auth(authorization)
+        tracking_state = "stopped"
+        await broadcast_status_changed()
+        return current_status().to_json_dict()
 
     @app.post("/shutdown")
     async def shutdown(
@@ -129,8 +248,15 @@ def create_app(state: RuntimeState) -> FastAPI:
         authorization: str | None = Header(default=None),
     ):
         require_auth(authorization)
-        background_tasks.add_task(os.kill, os.getpid(), signal.SIGTERM)
-        return {"status": "shutting-down"}
+        background_tasks.add_task(shutdown_callback or request_process_shutdown)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "shutting-down",
+                "scope": "full-runtime",
+                "ui_should_exit": True,
+            },
+        )
 
     @app.websocket("/events")
     async def events(websocket: WebSocket):
@@ -169,7 +295,45 @@ def create_app(state: RuntimeState) -> FastAPI:
         except WebSocketDisconnect:
             return
 
+    @app.websocket("/ui/events")
+    async def ui_events(websocket: WebSocket):
+        authorization = websocket.headers.get("authorization")
+        if not is_authorized(authorization, state.token):
+            await websocket.close(code=1008)
+            return
+
+        await websocket.accept()
+        ui_event_clients.add(websocket)
+        await websocket.send_json(
+            {
+                "type": "ui.ready",
+                "contract_version": CORE_UI_CONTRACT_VERSION,
+            }
+        )
+        await websocket.send_json(status_changed_event())
+        try:
+            while True:
+                await asyncio.sleep(60)
+        except WebSocketDisconnect:
+            return
+        finally:
+            ui_event_clients.discard(websocket)
+
     return app
+
+
+def application_support_config_path() -> Path:
+    return application_support_dir() / "config.json"
+
+
+def ensure_runtime_path(path: Path) -> Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def request_process_shutdown() -> None:
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def synthetic_display_bounds() -> DisplayBounds:

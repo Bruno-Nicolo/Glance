@@ -1,24 +1,28 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
-
-type GlanceStatus = {
-  core: string;
-  helper: string;
-  tracking: string;
-};
+import type {
+  CoreUiSettings,
+  CoreUiSettingsUpdate,
+  CoreUiStatus,
+  ShutdownResponse,
+} from '../shared/core-contract';
 
 declare global {
   interface Window {
     glance: {
-      getStatus: () => Promise<GlanceStatus>;
-      quitGlance: () => Promise<void>;
+      getStatus: () => Promise<CoreUiStatus>;
+      getSettings: () => Promise<CoreUiSettings>;
+      updateSettings: (update: CoreUiSettingsUpdate) => Promise<CoreUiSettings>;
+      startTracking: () => Promise<CoreUiStatus>;
+      stopTracking: () => Promise<CoreUiStatus>;
+      quitGlance: () => Promise<ShutdownResponse>;
     };
   }
 }
 
 function App() {
-  const [status, setStatus] = useState<GlanceStatus | null>(null);
+  const [status, setStatus] = useState<CoreUiStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,7 +30,7 @@ function App() {
       setStatus(nextStatus);
       setError(null);
     }).catch((nextError: unknown) => {
-      setStatus({ core: 'error', helper: 'unknown', tracking: 'unknown' });
+      setStatus(null);
       setError(nextError instanceof Error ? nextError.message : 'Unable to connect to Glance Core');
     });
   }, []);
@@ -37,6 +41,24 @@ function App() {
       setError(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to refresh status');
+    }
+  }
+
+  async function startTracking() {
+    try {
+      setStatus(await window.glance.startTracking());
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to start tracking');
+    }
+  }
+
+  async function stopTracking() {
+    try {
+      setStatus(await window.glance.stopTracking());
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to stop tracking');
     }
   }
 
@@ -58,18 +80,30 @@ function App() {
         <dl>
           <div>
             <dt>Core</dt>
-            <dd>{status?.core ?? 'loading'}</dd>
+            <dd>{status?.core.state ?? 'loading'}</dd>
           </div>
           <div>
             <dt>Helper</dt>
-            <dd>{status?.helper ?? 'loading'}</dd>
+            <dd>{status?.helper.state ?? 'loading'}</dd>
           </div>
           <div>
             <dt>Tracking</dt>
-            <dd>{status?.tracking ?? 'loading'}</dd>
+            <dd>{status?.tracking.state ?? 'loading'}</dd>
+          </div>
+          <div>
+            <dt>Input</dt>
+            <dd>{status?.tracking.input_enabled ? 'enabled' : 'disabled'}</dd>
+          </div>
+          <div>
+            <dt>Calibration</dt>
+            <dd>{status?.calibration.state ?? 'loading'}</dd>
           </div>
         </dl>
         {error ? <p className="error">{error}</p> : null}
+        <div className="controls">
+          <button type="button" onClick={startTracking}>Start</button>
+          <button type="button" onClick={stopTracking}>Stop</button>
+        </div>
         <button className="danger" type="button" onClick={() => window.glance.quitGlance()}>
           Quit Glance
         </button>
