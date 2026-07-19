@@ -6,9 +6,15 @@ contextBridge.exposeInMainWorld('glance', {
   updateSettings: (update: unknown) => ipcRenderer.invoke('glance:updateSettings', update),
   startTracking: () => ipcRenderer.invoke('glance:startTracking'),
   stopTracking: () => ipcRenderer.invoke('glance:stopTracking'),
+  getDiagnosticLogs: () => ipcRenderer.invoke('glance:getDiagnosticLogs'),
+  recordDiagnosticLog: (request: unknown) => ipcRenderer.invoke('glance:recordDiagnosticLog', request),
+  openPermissionSettings: (permission: unknown) => ipcRenderer.invoke('glance:openPermissionSettings', permission),
   createCalibrationSession: (request: unknown) => ipcRenderer.invoke('glance:createCalibrationSession', request),
   submitCalibrationSamples: (sessionId: string, request: unknown) => (
     ipcRenderer.invoke('glance:submitCalibrationSamples', sessionId, request)
+  ),
+  captureCalibrationSamples: (sessionId: string) => (
+    ipcRenderer.invoke('glance:captureCalibrationSamples', sessionId)
   ),
   completeCalibrationSession: (sessionId: string) => (
     ipcRenderer.invoke('glance:completeCalibrationSession', sessionId)

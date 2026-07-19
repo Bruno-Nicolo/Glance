@@ -558,6 +558,8 @@ final class HelperInputController {
     private var spacePressCanClick = false
     private var escIsDown = false
     private var permissionRetryTimer: Timer?
+    private var requestedAccessibilityPermission = false
+    private var requestedInputMonitoringPermission = false
 
     var spaceClickEnabled = true
     var pauseBehavior = "fast-recovery"
@@ -770,6 +772,19 @@ final class HelperInputController {
     }
 
     private func reportPermissions() {
+        let accessibilityGranted = AXIsProcessTrusted()
+        let inputMonitoringGranted = CGPreflightListenEventAccess()
+        if !accessibilityGranted && !requestedAccessibilityPermission {
+            requestedAccessibilityPermission = true
+            let options = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+            ] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
+        if !inputMonitoringGranted && !requestedInputMonitoringPermission {
+            requestedInputMonitoringPermission = true
+            _ = CGRequestListenEventAccess()
+        }
         coreSocket.sendPermission(
             permission: "accessibility",
             state: AXIsProcessTrusted() ? "granted" : "denied",

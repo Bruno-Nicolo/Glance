@@ -1,6 +1,7 @@
 pyproject.toml
 src/glance_core/__init__.py
 src/glance_core/__main__.py
+src/glance_core/diagnostics.py
 src/glance_core/paths.py
 src/glance_core/security.py
 src/glance_core/server.py

@@ -102,6 +102,16 @@ npm run dev:core
 npm run dev:helper
 ```
 
+The Core launches the Helper through `native/macos-helper/scripts/run-dev-app.sh` in development.
+That script builds a stable `GlanceHelper.app` bundle at:
+
+```text
+native/macos-helper/.build/arm64-apple-macosx/debug/GlanceHelper.app
+```
+
+Grant macOS Accessibility and Input Monitoring permissions to that app bundle, then restart Glance
+so macOS applies the permission to the Helper process.
+
 Useful environment variables:
 
 - `GLANCE_CORE_PORT`: force Core to bind a specific localhost port.
@@ -131,7 +141,7 @@ npm --workspace @glance/ui test
 Build the Swift Helper:
 
 ```bash
-swift build --package-path native/macos-helper
+native/macos-helper/scripts/run-dev-app.sh
 ```
 
 The Core API tests bind localhost sockets. The Swift build writes normal SwiftPM/clang cache files.

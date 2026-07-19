@@ -6,6 +6,7 @@ import shlex
 import signal
 import socket
 import subprocess
+import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -29,6 +30,11 @@ from .camera_gaze import (
     CameraGazeMetrics,
     MediaPipeOpenCVCamera,
     gaze_sample_event_from_mapping,
+)
+from .diagnostics import (
+    DIAGNOSTIC_COMPONENTS,
+    DIAGNOSTIC_SEVERITIES,
+    DiagnosticLogStore,
 )
 from .helper_events import (
     HELPER_FRAME_INTERVAL_MS,
@@ -79,9 +85,10 @@ class CameraSampleProvider(Protocol):
 
 
 class HelperProcess:
-    def __init__(self, token: str, port: int):
+    def __init__(self, token: str, port: int, diagnostics: DiagnosticLogStore):
         self.token = token
         self.port = port
+        self.diagnostics = diagnostics
         self.process: subprocess.Popen[bytes] | None = None
 
     @property
@@ -94,19 +101,14 @@ class HelperProcess:
 
     def start(self) -> None:
         if os.environ.get("GLANCE_DISABLE_HELPER") == "1":
+            self.diagnostics.record("helper", "info", "Helper launch skipped by GLANCE_DISABLE_HELPER")
             return
         if self.process is not None and self.process.poll() is None:
             return
 
         repo_root = Path(__file__).resolve().parents[3]
         command = os.environ.get("GLANCE_HELPER_COMMAND")
-        args = shlex.split(command) if command else [
-            "swift",
-            "run",
-            "--package-path",
-            str(repo_root / "native" / "macos-helper"),
-            "GlanceHelper",
-        ]
+        args = helper_command_args(repo_root, command)
 
         env = {
             **os.environ,
@@ -120,21 +122,47 @@ class HelperProcess:
                 args,
                 cwd=str(repo_root),
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            self.diagnostics.record("helper", "info", "Helper process started")
+            self._capture_stream("info", self.process.stdout)
+            self._capture_stream("warning", self.process.stderr)
         except OSError:
             self.process = None
+            self.diagnostics.record("helper", "error", "Helper process failed to start")
 
     def stop(self) -> None:
         if self.process is None or self.process.poll() is not None:
+            self.process = None
             return
 
         self.process.terminate()
         try:
             self.process.wait(timeout=2)
+            self.diagnostics.record("helper", "info", "Helper process stopped")
         except subprocess.TimeoutExpired:
             self.process.kill()
+            self.process.wait(timeout=2)
+            self.diagnostics.record("helper", "warning", "Helper process killed after shutdown timeout")
+        finally:
+            if self.process.stdout is not None:
+                self.process.stdout.close()
+            if self.process.stderr is not None:
+                self.process.stderr.close()
+            self.process = None
+
+    def _capture_stream(self, severity: str, stream: object) -> None:
+        if stream is None:
+            return
+
+        def read_lines() -> None:
+            for line in stream:
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    self.diagnostics.record("helper", helper_output_severity(severity, text), text)
+
+        threading.Thread(target=read_lines, daemon=True).start()
 
 
 def create_app(
@@ -142,9 +170,10 @@ def create_app(
     shutdown_callback: Callable[[], None] | None = None,
     camera_factory: Callable[[], CameraSampleProvider] | None = None,
 ) -> FastAPI:
-    helper = HelperProcess(token=state.token, port=state.port)
     synthetic_gaze_path = SyntheticGazePath(display=synthetic_display_bounds())
     settings_path = state.config_path or (application_support_config_path())
+    diagnostics = DiagnosticLogStore(settings_path.parent / "logs" / "glance-core.jsonl")
+    helper = HelperProcess(token=state.token, port=state.port, diagnostics=diagnostics)
     calibration_store = CalibrationSessionStore(calibration_profile_path(settings_path))
     settings = load_settings(settings_path)
     tracking_state = "stopped"
@@ -162,10 +191,12 @@ def create_app(
         runtime = ensure_runtime_path(state.runtime_path) if state.runtime_path else runtime_dir()
         (runtime / "core.pid").write_text(str(os.getpid()), encoding="utf-8")
         (runtime / "core.port").write_text(str(state.port), encoding="utf-8")
+        diagnostics.record("core", "info", "Core runtime started", {"port": state.port})
         helper.start()
         yield
         close_camera_provider(camera_provider)
         helper.stop()
+        diagnostics.record("core", "info", "Core runtime stopped")
 
     app = FastAPI(title="Glance Core", version="0.1.0", lifespan=lifespan)
 
@@ -243,6 +274,27 @@ def create_app(
             "status": current_status().to_json_dict(),
         }
 
+    def ensure_camera_sample_provider() -> CameraSampleProvider:
+        nonlocal camera_provider, camera_state, camera_error
+        if camera_provider is None:
+            camera_provider = (
+                camera_factory()
+                if camera_factory is not None
+                else MediaPipeOpenCVCamera(model_asset_path=camera_model_asset_path())
+            )
+        camera_state = "running"
+        camera_error = None
+        return camera_provider
+
+    def camera_sample_to_calibration_sample(sample: RawGazeSample) -> dict[str, object] | None:
+        if sample.features is None or sample.quality is None:
+            return None
+        return {
+            "sample_at_ms": sample.sample_at_ms,
+            "features": sample.features,
+            "quality": sample.quality,
+        }
+
     async def broadcast_status_changed() -> None:
         disconnected: list[WebSocket] = []
         for client in ui_event_clients:
@@ -270,6 +322,7 @@ def create_app(
                 "pause-started",
                 "pause-ended",
             }:
+                diagnostics.record("helper", "warning", "Ignored helper input event with unknown action")
                 return None
             if suppressed_reason not in {
                 None,
@@ -279,6 +332,7 @@ def create_app(
                 "repeat",
                 "no-cursor",
             }:
+                diagnostics.record("helper", "warning", "Ignored helper input event with unknown suppressed reason")
                 return None
 
             paused = helper_input.paused
@@ -318,14 +372,17 @@ def create_app(
                 permissions=helper_input.permissions,
             )
             await broadcast_status_changed()
+            diagnostics.record("tracking", "info", f"Helper input updated tracking state to {tracking_state}")
             return response
 
         if message_type == "helper.permission":
             permission = payload.get("permission")
             state_value = payload.get("state")
             if permission not in {"accessibility", "input-monitoring"}:
+                diagnostics.record("helper", "warning", "Ignored helper permission event with unknown permission")
                 return None
             if state_value not in {"granted", "denied", "unknown"}:
+                diagnostics.record("helper", "warning", "Ignored helper permission event with unknown state")
                 return None
 
             permissions = {**helper_input.permissions, str(permission).replace("-", "_"): state_value}
@@ -336,6 +393,7 @@ def create_app(
                 permissions=permissions,
             )
             await broadcast_status_changed()
+            diagnostics.record("helper", "info", f"Helper permission {permission} is {state_value}")
             return None
 
         return None
@@ -385,7 +443,9 @@ def create_app(
                 raise SettingsValidationError("Settings update must be an object")
             settings = apply_settings_update(settings, payload)
             save_settings(settings_path, settings)
+            diagnostics.record("core", "info", "Settings updated")
         except SettingsValidationError as error:
+            diagnostics.record("core", "warning", "Rejected invalid settings update", {"error": str(error)})
             return JSONResponse(
                 status_code=400,
                 content=ContractError(
@@ -402,6 +462,7 @@ def create_app(
         nonlocal tracking_state
         require_auth(authorization)
         tracking_state = "running"
+        diagnostics.record("tracking", "info", "Tracking started")
         await broadcast_status_changed()
         return current_status().to_json_dict()
 
@@ -410,6 +471,7 @@ def create_app(
         nonlocal tracking_state
         require_auth(authorization)
         tracking_state = "stopped"
+        diagnostics.record("tracking", "info", "Tracking stopped")
         await broadcast_status_changed()
         return current_status().to_json_dict()
 
@@ -435,8 +497,10 @@ def create_app(
         try:
             session = calibration_store.create(mode=mode, display=display)
         except CalibrationSessionError as error:
+            diagnostics.record("calibration", "warning", "Calibration session rejected", {"error": str(error)})
             raise_calibration_error(error.code, str(error))
         tracking_state = "paused"
+        diagnostics.record("calibration", "info", f"Calibration session started: {mode}")
         await broadcast_status_changed()
         return calibration_session_response(session)
 
@@ -451,9 +515,68 @@ def create_app(
         try:
             session = calibration_store.add_samples(session_id, payload)
         except CalibrationSessionError as error:
+            diagnostics.record("calibration", "warning", "Calibration samples rejected", {"error": str(error)})
             raise_calibration_error(error.code, str(error))
 
+        diagnostics.record("calibration", "info", "Calibration samples accepted")
         await broadcast_calibration_changed(session)
+        return calibration_session_response(session)
+
+    @app.post("/calibration/sessions/{session_id}/capture")
+    async def capture_calibration_samples(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        nonlocal camera_state, camera_error
+        require_auth(authorization)
+        session = calibration_store.require_active(session_id)
+        if session.current_target_index >= len(session.targets):
+            raise_calibration_error("invalid_calibration_sample", "All targets already have samples")
+
+        samples: list[dict[str, object]] = []
+        try:
+            provider = ensure_camera_sample_provider()
+            for _index in range(15):
+                sample = await asyncio.to_thread(provider.sample)
+                calibration_sample = (
+                    camera_sample_to_calibration_sample(sample)
+                    if sample is not None
+                    else None
+                )
+                if calibration_sample is not None:
+                    samples.append(calibration_sample)
+                await asyncio.sleep(0.05)
+        except CameraGazeError as error:
+            camera_state = "error"
+            camera_error = str(error)
+            diagnostics.record("camera", "error", "Camera calibration capture failed", {"error": str(error)})
+            await broadcast_status_changed()
+            raise HTTPException(
+                status_code=400,
+                detail=ContractError(
+                    code="camera_unavailable",
+                    message=str(error),
+                    recoverable=True,
+                ).to_response(),
+            )
+
+        if not samples:
+            diagnostics.record("camera", "warning", "Camera calibration capture produced no samples")
+            raise_calibration_error("calibration_failed", "Unable to collect camera calibration samples")
+
+        target = session.targets[session.current_target_index]
+        try:
+            session = calibration_store.add_samples(
+                session_id,
+                {"target_id": target.id, "samples": samples},
+            )
+        except CalibrationSessionError as error:
+            diagnostics.record("calibration", "warning", "Captured calibration samples rejected", {"error": str(error)})
+            raise_calibration_error(error.code, str(error))
+
+        diagnostics.record("camera", "info", "Camera calibration samples captured", {"sample_count": len(samples)})
+        await broadcast_calibration_changed(session)
+        await broadcast_status_changed()
         return calibration_session_response(session)
 
     @app.post("/calibration/sessions/{session_id}/complete")
@@ -466,8 +589,10 @@ def create_app(
         try:
             session, profile, validation = calibration_store.complete(session_id)
         except CalibrationSessionError as error:
+            diagnostics.record("calibration", "warning", "Calibration completion failed", {"error": str(error)})
             raise_calibration_error(error.code, str(error))
         tracking_state = "stopped"
+        diagnostics.record("calibration", "info", f"Calibration session completed: {session.mode}")
         await broadcast_status_changed()
         return {
             "contract_version": 1,
@@ -490,8 +615,10 @@ def create_app(
         try:
             session = calibration_store.cancel(session_id)
         except CalibrationSessionError as error:
+            diagnostics.record("calibration", "warning", "Calibration cancellation failed", {"error": str(error)})
             raise_calibration_error(error.code, str(error))
         tracking_state = "stopped"
+        diagnostics.record("calibration", "info", "Calibration session cancelled")
         await broadcast_status_changed()
         return {
             "contract_version": 1,
@@ -530,7 +657,12 @@ def create_app(
         background_tasks: BackgroundTasks,
         authorization: str | None = Header(default=None),
     ):
+        nonlocal camera_provider
         require_auth(authorization)
+        diagnostics.record("core", "info", "Full runtime shutdown requested")
+        close_camera_provider(camera_provider)
+        camera_provider = None
+        helper.stop()
         background_tasks.add_task(shutdown_callback or request_process_shutdown)
         return JSONResponse(
             status_code=202,
@@ -586,18 +718,12 @@ def create_app(
                     sequence += 1
                 elif tracking_state == "running":
                     try:
-                        if camera_provider is None:
-                            camera_provider = (
-                                camera_factory()
-                                if camera_factory is not None
-                                else MediaPipeOpenCVCamera(model_asset_path=camera_model_asset_path())
-                            )
-                        camera_state = "running"
-                        camera_error = None
-                        sample = await asyncio.to_thread(camera_provider.sample)
+                        provider = ensure_camera_sample_provider()
+                        sample = await asyncio.to_thread(provider.sample)
                     except CameraGazeError as error:
                         camera_state = "error"
                         camera_error = str(error)
+                        diagnostics.record("camera", "error", "Camera stream failed", {"error": str(error)})
                         await websocket.send_json(
                             TrackingStatusEvent(
                                 sent_at_ms=sent_at_ms,
@@ -661,6 +787,51 @@ def create_app(
         finally:
             ui_event_clients.discard(websocket)
 
+    @app.get("/diagnostics/logs")
+    async def get_diagnostic_logs(
+        authorization: str | None = Header(default=None),
+        component: str | None = None,
+        limit: int = 200,
+    ):
+        require_auth(authorization)
+        if component is not None and component not in DIAGNOSTIC_COMPONENTS:
+            raise HTTPException(
+                status_code=400,
+                detail=ContractError(
+                    code="invalid_diagnostics_filter",
+                    message=f"Unknown diagnostic component: {component}",
+                    recoverable=True,
+                ).to_response(),
+            )
+        return diagnostics.to_response(component=component, limit=limit)
+
+    @app.post("/diagnostics/logs")
+    async def post_diagnostic_log(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        require_auth(authorization)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise_diagnostics_error("Diagnostic log entry must be an object")
+        component = payload.get("component")
+        severity = payload.get("severity", "info")
+        message = payload.get("message")
+        details = payload.get("details")
+        if component not in DIAGNOSTIC_COMPONENTS:
+            raise_diagnostics_error("Diagnostic log entry requires a known component")
+        if severity not in DIAGNOSTIC_SEVERITIES:
+            raise_diagnostics_error("Diagnostic log entry requires a known severity")
+        if not isinstance(message, str) or message.strip() == "":
+            raise_diagnostics_error("Diagnostic log entry requires a non-empty message")
+        if details is not None and not isinstance(details, dict):
+            raise_diagnostics_error("Diagnostic log entry details must be an object")
+        entry = diagnostics.record(component, severity, message, details)
+        return {
+            "contract_version": CORE_UI_CONTRACT_VERSION,
+            "entry": entry.to_json_dict(),
+        }
+
     return app
 
 
@@ -710,6 +881,39 @@ def raise_calibration_error(code: str, message: str) -> None:
         status_code=400,
         detail=ContractError(code=code, message=message, recoverable=True).to_response(),
     )
+
+
+def raise_diagnostics_error(message: str) -> None:
+    raise HTTPException(
+        status_code=400,
+        detail=ContractError(
+            code="invalid_diagnostic_log",
+            message=message,
+            recoverable=True,
+        ).to_response(),
+    )
+
+
+def helper_output_severity(default_severity: str, message: str) -> str:
+    lowered = message.lower()
+    if "error:" in lowered or "failed" in lowered:
+        return "error"
+    if "warning:" in lowered:
+        return "warning"
+    if (
+        "build complete" in lowered
+        or "building for debugging" in lowered
+        or "planning build" in lowered
+        or "write swift-version" in lowered
+    ):
+        return "info"
+    return default_severity
+
+
+def helper_command_args(repo_root: Path, command: str | None = None) -> list[str]:
+    if command:
+        return shlex.split(command)
+    return [str(repo_root / "native" / "macos-helper" / "scripts" / "run-dev-app.sh")]
 
 
 def find_available_port() -> int:

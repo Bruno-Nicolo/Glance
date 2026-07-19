@@ -8,6 +8,6 @@
   "scripts": {
     "dev:ui": "npm --workspace @glance/ui run dev",
     "dev:core": "PYTHONPATH=core/src python3 -m glance_core",
-    "dev:helper": "swift run --package-path native/macos-helper GlanceHelper"
+    "dev:helper": "native/macos-helper/scripts/run-dev-app.sh"
   }
 }

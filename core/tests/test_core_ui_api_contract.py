@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import unittest
@@ -18,7 +19,7 @@ import websockets
 from glance_core.calibration_contract import CALIBRATION_FEATURE_NAMES
 from glance_core.camera_gaze import CameraGazeMetrics
 from glance_core.gaze_mapping_contract import RawGazeSample
-from glance_core.server import RuntimeState, create_app
+from glance_core.server import RuntimeState, create_app, helper_command_args, helper_output_severity
 
 
 class CoreUiApiContractTests(unittest.TestCase):
@@ -313,6 +314,23 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(sample_status, 400)
         self.assertEqual(body["error"]["code"], "invalid_calibration_sample")
 
+    def test_calibration_capture_uses_camera_provider_by_default(self) -> None:
+        create_status, session = self.request(
+            "POST",
+            "/calibration/sessions",
+            {"mode": "initial-9-point", "display_id": "main"},
+        )
+        capture_status, captured = self.post(f"/calibration/sessions/{session['session_id']}/capture")
+        _status_code, status = self.get("/status")
+
+        self.assertEqual(create_status, 200)
+        self.assertEqual(capture_status, 200)
+        self.assertEqual(captured["session_id"], session["session_id"])
+        self.assertEqual(captured["current_target_index"], 1)
+        self.assertEqual(status["gaze"]["source"], "camera")
+        self.assertEqual(status["camera"]["state"], "running")
+        self.assertEqual(status["camera"]["metrics"]["captured_frames"], 15)
+
     def create_and_collect_calibration_session(self, mode: str) -> dict:
         create_status, session = self.request(
             "POST",
@@ -384,6 +402,42 @@ class CoreUiApiContractTests(unittest.TestCase):
         while not self.shutdown_requested and time.time() < deadline:
             time.sleep(0.01)
         self.assertTrue(self.shutdown_requested)
+
+    def test_diagnostics_logs_expose_privacy_preserving_component_entries(self) -> None:
+        _start_status, _start_body = self.post("/controls/start")
+        post_status, post_body = self.request(
+            "POST",
+            "/diagnostics/logs",
+            {
+                "component": "renderer",
+                "severity": "info",
+                "message": "Start tracking requested from UI",
+                "details": {"view": "status"},
+            },
+        )
+        get_status, body = self.get("/diagnostics/logs")
+        filtered_status, filtered = self.get("/diagnostics/logs?component=tracking&limit=10")
+
+        self.assertEqual(post_status, 200)
+        self.assertEqual(post_body["entry"]["component"], "renderer")
+        self.assertEqual(get_status, 200)
+        self.assertEqual(body["contract_version"], 1)
+        self.assertTrue(any(entry["component"] == "core" for entry in body["entries"]))
+        self.assertTrue(any(entry["component"] == "tracking" for entry in body["entries"]))
+        self.assertTrue(any(entry["component"] == "renderer" for entry in body["entries"]))
+        self.assertEqual(filtered_status, 200)
+        self.assertGreaterEqual(len(filtered["entries"]), 1)
+        self.assertTrue(all(entry["component"] == "tracking" for entry in filtered["entries"]))
+
+        persisted_log = self.config_path.parent / "logs" / "glance-core.jsonl"
+        self.assertTrue(persisted_log.exists())
+        self.assertNotIn("raw", persisted_log.read_text(encoding="utf-8").lower())
+
+    def test_diagnostics_logs_reject_unknown_components(self) -> None:
+        status_code, body = self.get("/diagnostics/logs?component=unknown")
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(body["error"]["code"], "invalid_diagnostics_filter")
 
     def test_unauthorized_requests_return_structured_error(self) -> None:
         request = Request(f"http://127.0.0.1:{self.port}/status")
@@ -616,6 +670,146 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(FakeCameraSampleProvider.closed_count, 1)
 
 
+class CoreRuntimeShutdownTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        self.runtime_path = Path(self.temp_dir.name) / "runtime"
+        self.runtime_path.mkdir()
+        self.helper_pid_path = Path(self.temp_dir.name) / "helper.pid"
+        self.helper_script_path = Path(self.temp_dir.name) / "helper_process.py"
+        self.helper_script_path.write_text(
+            "\n".join([
+                "from pathlib import Path",
+                "import os",
+                "import signal",
+                "import time",
+                f"Path({str(self.helper_pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')",
+                "def stop(_signal, _frame):",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, stop)",
+                "while True:",
+                "    print('helper alive', flush=True)",
+                "    time.sleep(0.1)",
+            ]),
+            encoding="utf-8",
+        )
+        self.previous_disable_helper = os.environ.pop("GLANCE_DISABLE_HELPER", None)
+        self.previous_helper_command = os.environ.get("GLANCE_HELPER_COMMAND")
+        os.environ["GLANCE_HELPER_COMMAND"] = f"{sys.executable} {self.helper_script_path}"
+        self.addCleanup(self._restore_helper_environment)
+        self.shutdown_requested = False
+        self.port = self._find_available_port()
+        app = create_app(
+            RuntimeState(
+                token="test-token",
+                port=self.port,
+                config_path=self.config_path,
+                runtime_path=self.runtime_path,
+            ),
+            shutdown_callback=self._mark_shutdown_requested,
+            camera_factory=FakeCameraSampleProvider,
+        )
+        self.server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="critical")
+        )
+        self.server_thread = threading.Thread(target=self.server.run, daemon=True)
+        self.server_thread.start()
+        self._wait_for_server()
+        self._wait_for_helper()
+        self.addCleanup(self._stop_server)
+
+    def _mark_shutdown_requested(self) -> None:
+        self.shutdown_requested = True
+
+    def _restore_helper_environment(self) -> None:
+        if self.previous_disable_helper is None:
+            os.environ.pop("GLANCE_DISABLE_HELPER", None)
+        else:
+            os.environ["GLANCE_DISABLE_HELPER"] = self.previous_disable_helper
+        if self.previous_helper_command is None:
+            os.environ.pop("GLANCE_HELPER_COMMAND", None)
+        else:
+            os.environ["GLANCE_HELPER_COMMAND"] = self.previous_helper_command
+
+    def _stop_server(self) -> None:
+        self.server.should_exit = True
+        self.server_thread.join(timeout=2)
+
+    def _wait_for_server(self) -> None:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                self.request("GET", "/health")
+                return
+            except OSError:
+                time.sleep(0.05)
+        self.fail("Timed out waiting for test server")
+
+    def _wait_for_helper(self) -> None:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if self.helper_pid_path.exists():
+                return
+            time.sleep(0.05)
+        self.fail("Timed out waiting for helper process")
+
+    def _find_available_port(self) -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
+    def request(self, method: str, route: str) -> tuple[int, dict]:
+        request = Request(
+            f"http://127.0.0.1:{self.port}{route}",
+            headers={"Authorization": "Bearer test-token"},
+            method=method,
+        )
+        try:
+            with urlopen(request, timeout=2) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    def test_full_runtime_shutdown_stops_helper_before_reporting_success(self) -> None:
+        helper_pid = int(self.helper_pid_path.read_text(encoding="utf-8"))
+
+        status_code, body = self.request("POST", "/shutdown")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(body["scope"], "full-runtime")
+        deadline = time.time() + 2
+        while process_exists(helper_pid) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(process_exists(helper_pid))
+
+
+class DiagnosticLogFormattingTests(unittest.TestCase):
+    def test_swiftpm_build_progress_is_not_reported_as_helper_error(self) -> None:
+        self.assertEqual(helper_output_severity("warning", "[0/1] Planning build"), "info")
+        self.assertEqual(helper_output_severity("warning", "Build complete! (0.17s)"), "info")
+        self.assertEqual(helper_output_severity("warning", "error: Invalid manifest"), "error")
+
+
+class HelperLaunchCommandTests(unittest.TestCase):
+    def test_default_helper_launches_dev_app_bundle_wrapper(self) -> None:
+        repo_root = Path("/repo")
+
+        self.assertEqual(
+            helper_command_args(repo_root),
+            ["/repo/native/macos-helper/scripts/run-dev-app.sh"],
+        )
+
+    def test_helper_launch_command_can_be_overridden(self) -> None:
+        repo_root = Path("/repo")
+
+        self.assertEqual(
+            helper_command_args(repo_root, "/custom/helper --flag"),
+            ["/custom/helper", "--flag"],
+        )
+
+
 class FakeCameraSampleProvider:
     closed_count = 0
 
@@ -640,6 +834,14 @@ class FakeCameraSampleProvider:
 
     def close(self) -> None:
         FakeCameraSampleProvider.closed_count += 1
+
+
+def process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 if __name__ == "__main__":

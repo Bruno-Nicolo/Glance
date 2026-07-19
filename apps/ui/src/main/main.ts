@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import WebSocket from 'ws';
@@ -14,8 +14,10 @@ import {
   waitForHealthyCore,
   type CoreConnection,
 } from './core-lifecycle';
+import { resolvePreloadScriptPath } from './window-paths';
 import type {
   CalibrationCancelResponse,
+  CalibrationCaptureResponse,
   CalibrationCompleteResponse,
   CalibrationSamplesRequest,
   CalibrationSession,
@@ -23,6 +25,9 @@ import type {
   CoreUiSettings,
   CoreUiSettingsUpdate,
   CoreUiStatus,
+  DiagnosticLogRequest,
+  DiagnosticLogsResponse,
+  HelperPermissionName,
   ShutdownResponse,
 } from '../shared/core-contract';
 
@@ -36,12 +41,14 @@ class CoreClient {
   private connection: CoreConnection | null = null;
   private process: ChildProcess | null = null;
   private events: WebSocket | null = null;
+  private diagnosticsAnnouncedFor: string | null = null;
 
   async ensureConnected() {
     const existing = await readCoreConnection(runtimePath);
     if (existing && (await isCoreHealthy(existing))) {
       this.connection = existing;
       this.openEvents(existing);
+      void this.announceElectronMain(existing).catch(() => undefined);
       return existing;
     }
 
@@ -50,6 +57,7 @@ class CoreClient {
     const started = await waitForHealthyCore({ runtimePath });
     this.connection = started;
     this.openEvents(started);
+    void this.announceElectronMain(started).catch(() => undefined);
     return started;
   }
 
@@ -107,6 +115,41 @@ class CoreClient {
     return (await response.json()) as CoreUiStatus;
   }
 
+  async getDiagnosticLogs(): Promise<DiagnosticLogsResponse> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, '/diagnostics/logs?limit=200');
+    if (!response.ok) {
+      throw new Error(`Core diagnostics logs failed with ${response.status}`);
+    }
+
+    return (await response.json()) as DiagnosticLogsResponse;
+  }
+
+  async recordDiagnosticLog(request: DiagnosticLogRequest): Promise<void> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, '/diagnostics/logs', {
+      method: 'POST',
+      body: JSON.stringify(request),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) {
+      throw new Error(`Core diagnostics log write failed with ${response.status}`);
+    }
+  }
+
+  async openPermissionSettings(permission: HelperPermissionName): Promise<void> {
+    const settingsUrls: Record<HelperPermissionName, string> = {
+      accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+      input_monitoring: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent',
+    };
+    await shell.openExternal(settingsUrls[permission]);
+    await this.recordDiagnosticLog({
+      component: 'electron-main',
+      severity: 'info',
+      message: `Opened macOS ${permission} permission settings`,
+    });
+  }
+
   async createCalibrationSession(request: CalibrationSessionRequest): Promise<CalibrationSession> {
     const connection = await this.ensureConnected();
     const response = await fetchCore(connection, '/calibration/sessions', {
@@ -136,6 +179,18 @@ class CoreClient {
     }
 
     return (await response.json()) as CalibrationSession;
+  }
+
+  async captureCalibrationSamples(sessionId: string): Promise<CalibrationCaptureResponse> {
+    const connection = await this.ensureConnected();
+    const response = await fetchCore(connection, `/calibration/sessions/${sessionId}/capture`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error(`Core calibration capture failed with ${response.status}`);
+    }
+
+    return (await response.json()) as CalibrationCaptureResponse;
   }
 
   async completeCalibrationSession(sessionId: string): Promise<CalibrationCompleteResponse> {
@@ -198,8 +253,40 @@ class CoreClient {
     });
 
     this.events.on('close', () => {
+      if (this.connection) {
+        void this.writeDiagnosticLog(this.connection, {
+          component: 'electron-main',
+          severity: 'warning',
+          message: 'UI diagnostics WebSocket closed',
+        }).catch(() => undefined);
+      }
       this.events = null;
     });
+  }
+
+  private async announceElectronMain(connection: CoreConnection) {
+    const connectionKey = `${connection.port}:${connection.token}`;
+    if (this.diagnosticsAnnouncedFor === connectionKey) {
+      return;
+    }
+
+    this.diagnosticsAnnouncedFor = connectionKey;
+    await this.writeDiagnosticLog(connection, {
+      component: 'electron-main',
+      severity: 'info',
+      message: 'Electron main connected to Core diagnostics',
+    });
+  }
+
+  private async writeDiagnosticLog(connection: CoreConnection, request: DiagnosticLogRequest) {
+    const response = await fetchCore(connection, '/diagnostics/logs', {
+      method: 'POST',
+      body: JSON.stringify(request),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) {
+      throw new Error(`Core diagnostics log write failed with ${response.status}`);
+    }
   }
 }
 
@@ -209,7 +296,7 @@ function createWindow() {
     height: 680,
     title: 'Glance',
     webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.js'),
+      preload: resolvePreloadScriptPath(__dirname),
     },
   });
 
@@ -234,6 +321,13 @@ app.whenReady().then(() => {
   ));
   ipcMain.handle('glance:startTracking', async () => coreClient?.startTracking());
   ipcMain.handle('glance:stopTracking', async () => coreClient?.stopTracking());
+  ipcMain.handle('glance:getDiagnosticLogs', async () => coreClient?.getDiagnosticLogs());
+  ipcMain.handle('glance:recordDiagnosticLog', async (_event, request: DiagnosticLogRequest) => (
+    coreClient?.recordDiagnosticLog(request)
+  ));
+  ipcMain.handle('glance:openPermissionSettings', async (_event, permission: HelperPermissionName) => (
+    coreClient?.openPermissionSettings(permission)
+  ));
   ipcMain.handle('glance:createCalibrationSession', async (_event, request: CalibrationSessionRequest) => (
     coreClient?.createCalibrationSession(request)
   ));
@@ -243,6 +337,9 @@ app.whenReady().then(() => {
       coreClient?.submitCalibrationSamples(sessionId, request)
     ),
   );
+  ipcMain.handle('glance:captureCalibrationSamples', async (_event, sessionId: string) => (
+    coreClient?.captureCalibrationSamples(sessionId)
+  ));
   ipcMain.handle('glance:completeCalibrationSession', async (_event, sessionId: string) => (
     coreClient?.completeCalibrationSession(sessionId)
   ));

@@ -105,6 +105,39 @@ export type CoreUiError = {
   recoverable: boolean;
 };
 
+export type DiagnosticComponent =
+  | 'core'
+  | 'helper'
+  | 'electron-main'
+  | 'renderer'
+  | 'camera'
+  | 'calibration'
+  | 'tracking';
+
+export type DiagnosticSeverity = 'debug' | 'info' | 'warning' | 'error';
+
+export type DiagnosticLogEntry = {
+  timestamp_ms: number;
+  component: DiagnosticComponent;
+  severity: DiagnosticSeverity;
+  message: string;
+  details: Record<string, unknown> | null;
+};
+
+export type DiagnosticLogsResponse = {
+  contract_version: number;
+  entries: DiagnosticLogEntry[];
+};
+
+export type DiagnosticLogRequest = {
+  component: DiagnosticComponent;
+  severity?: DiagnosticSeverity;
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+export type HelperPermissionName = 'accessibility' | 'input_monitoring';
+
 export type ShutdownResponse = {
   status: 'shutting-down';
   scope: 'full-runtime';
@@ -179,6 +212,8 @@ export type CalibrationSamplesRequest = {
   target_id: string;
   samples: CalibrationSample[];
 };
+
+export type CalibrationCaptureResponse = CalibrationSession;
 
 export type CalibrationCompleteResponse = {
   contract_version: number;

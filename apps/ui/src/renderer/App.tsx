@@ -1,6 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { CheckCircle2, Crosshair, Power, RefreshCw, Square, Play, SlidersHorizontal, XCircle } from 'lucide-react';
+import {
+  CheckCircle2,
+  Crosshair,
+  ExternalLink,
+  ListFilter,
+  Power,
+  RefreshCw,
+  Square,
+  Play,
+  SlidersHorizontal,
+  XCircle,
+} from 'lucide-react';
 import './styles.css';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -16,6 +27,7 @@ import { Switch } from '@/components/ui/switch';
 import { createSyntheticCalibrationSamples } from '../shared/calibration-synthetic';
 import type {
   CalibrationCancelResponse,
+  CalibrationCaptureResponse,
   CalibrationCompleteResponse,
   CalibrationMode,
   CalibrationSamplesRequest,
@@ -24,22 +36,30 @@ import type {
   CoreUiSettings,
   CoreUiSettingsUpdate,
   CoreUiStatus,
+  DiagnosticComponent,
+  DiagnosticLogEntry,
+  DiagnosticLogRequest,
+  HelperPermissionName,
   ShutdownResponse,
 } from '../shared/core-contract';
 
 declare global {
   interface Window {
-    glance: {
+    glance?: {
       getStatus: () => Promise<CoreUiStatus>;
       getSettings: () => Promise<CoreUiSettings>;
       updateSettings: (update: CoreUiSettingsUpdate) => Promise<CoreUiSettings>;
       startTracking: () => Promise<CoreUiStatus>;
       stopTracking: () => Promise<CoreUiStatus>;
+      getDiagnosticLogs: () => Promise<{ entries: DiagnosticLogEntry[] }>;
+      recordDiagnosticLog: (request: DiagnosticLogRequest) => Promise<void>;
+      openPermissionSettings: (permission: HelperPermissionName) => Promise<void>;
       createCalibrationSession: (request: CalibrationSessionRequest) => Promise<CalibrationSession>;
       submitCalibrationSamples: (
         sessionId: string,
         request: CalibrationSamplesRequest,
       ) => Promise<CalibrationSession>;
+      captureCalibrationSamples: (sessionId: string) => Promise<CalibrationCaptureResponse>;
       completeCalibrationSession: (sessionId: string) => Promise<CalibrationCompleteResponse>;
       cancelCalibrationSession: (sessionId: string) => Promise<CalibrationCancelResponse>;
       quitGlance: () => Promise<ShutdownResponse>;
@@ -53,6 +73,16 @@ type CalibrationRunState = {
   complete: CalibrationCompleteResponse | null;
 };
 
+type GlanceBridge = NonNullable<Window['glance']>;
+
+function requireGlanceBridge(): GlanceBridge {
+  if (!window.glance) {
+    throw new Error('Glance preload bridge is unavailable. Restart the Electron dev server.');
+  }
+
+  return window.glance;
+}
+
 function App() {
   const [status, setStatus] = useState<CoreUiStatus | null>(null);
   const [settings, setSettings] = useState<CoreUiSettings | null>(null);
@@ -61,12 +91,25 @@ function App() {
     session: null,
     complete: null,
   });
+  const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
+  const [diagnosticFilter, setDiagnosticFilter] = useState<DiagnosticComponent | 'all'>('all');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([window.glance.getStatus(), window.glance.getSettings()]).then(([nextStatus, nextSettings]) => {
+    const glance = window.glance;
+    if (!glance) {
+      setError('Glance preload bridge is unavailable. Restart the Electron dev server.');
+      return;
+    }
+
+    Promise.all([glance.getStatus(), glance.getSettings(), glance.getDiagnosticLogs()]).then(([
+      nextStatus,
+      nextSettings,
+      nextLogs,
+    ]) => {
       setStatus(nextStatus);
       setSettings(nextSettings);
+      setDiagnosticLogs(nextLogs.entries);
       setError(null);
     }).catch((nextError: unknown) => {
       setStatus(null);
@@ -76,9 +119,10 @@ function App() {
 
   async function refreshStatus() {
     try {
+      const glance = requireGlanceBridge();
       const [nextStatus, nextSettings] = await Promise.all([
-        window.glance.getStatus(),
-        window.glance.getSettings(),
+        glance.getStatus(),
+        glance.getSettings(),
       ]);
       setStatus(nextStatus);
       setSettings(nextSettings);
@@ -88,9 +132,48 @@ function App() {
     }
   }
 
+  async function refreshDiagnosticLogs() {
+    try {
+      const nextLogs = await requireGlanceBridge().getDiagnosticLogs();
+      setDiagnosticLogs(nextLogs.entries);
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to refresh diagnostics');
+    }
+  }
+
+  async function recordRendererDiagnostic(
+    severity: DiagnosticLogRequest['severity'],
+    message: string,
+    details?: Record<string, unknown>,
+  ) {
+    try {
+      await requireGlanceBridge().recordDiagnosticLog({
+        component: 'renderer',
+        severity,
+        message,
+        details,
+      });
+      await refreshDiagnosticLogs();
+    } catch {
+      // Diagnostics must not break the runtime controls they are meant to inspect.
+    }
+  }
+
+  async function openPermissionSettings(permission: HelperPermissionName) {
+    try {
+      await requireGlanceBridge().openPermissionSettings(permission);
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to open macOS settings');
+    }
+  }
+
   async function startTracking() {
     try {
-      setStatus(await window.glance.startTracking());
+      await recordRendererDiagnostic('info', 'Start tracking requested from UI');
+      setStatus(await requireGlanceBridge().startTracking());
+      await refreshDiagnosticLogs();
       setError(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to start tracking');
@@ -99,7 +182,9 @@ function App() {
 
   async function stopTracking() {
     try {
-      setStatus(await window.glance.stopTracking());
+      await recordRendererDiagnostic('info', 'Stop tracking requested from UI');
+      setStatus(await requireGlanceBridge().stopTracking());
+      await refreshDiagnosticLogs();
       setError(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to stop tracking');
@@ -128,55 +213,125 @@ function App() {
 
   async function updateSettings(update: CoreUiSettingsUpdate) {
     try {
-      setSettings(await window.glance.updateSettings(update));
+      setSettings(await requireGlanceBridge().updateSettings(update));
+      await refreshDiagnosticLogs();
       setError(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to update settings');
     }
   }
 
-  async function runSyntheticCalibration() {
+  async function startCalibration() {
+    if (status && hasDeniedHelperPermissions(status)) {
+      setError('Grant Accessibility and Input Monitoring permissions, then refresh status before calibrating.');
+      return;
+    }
+
     try {
       setError(null);
-      const initialComplete = await collectCalibrationMode('initial-9-point', 'initial');
-      const validationComplete = await collectCalibrationMode('validation', 'validation');
-      setCalibrationRun({ phase: 'complete', session: null, complete: validationComplete });
-      setStatus(validationComplete.status);
-      if (initialComplete.profile_id !== null || !validationComplete.profile_id) {
-        throw new Error('Calibration did not produce a persisted profile');
-      }
+      const session = await requireGlanceBridge().createCalibrationSession({
+        mode: 'initial-9-point',
+        display_id: 'main',
+      });
+      await recordRendererDiagnostic('info', 'Initial calibration started from UI');
+      setCalibrationRun({ phase: 'initial', session, complete: null });
+      await refreshStatus();
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Unable to complete calibration');
+      setError(nextError instanceof Error ? nextError.message : 'Unable to start calibration');
     }
   }
 
   async function runDriftCorrection() {
     try {
       setError(null);
-      const complete = await collectCalibrationMode('drift-1-point', 'drift');
-      setCalibrationRun({ phase: 'complete', session: null, complete });
-      setStatus(complete.status);
+      const session = await requireGlanceBridge().createCalibrationSession({
+        mode: 'drift-1-point',
+        display_id: 'main',
+      });
+      await recordRendererDiagnostic('info', 'Drift correction started from UI');
+      setCalibrationRun({ phase: 'drift', session, complete: null });
+      await refreshStatus();
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Unable to complete drift correction');
+      setError(nextError instanceof Error ? nextError.message : 'Unable to start drift correction');
     }
   }
 
-  async function collectCalibrationMode(
+  async function captureCalibrationTarget() {
+    if (!calibrationRun.session) {
+      return;
+    }
+
+    try {
+      setError(null);
+      const session = await requireGlanceBridge().captureCalibrationSamples(calibrationRun.session.session_id);
+      setCalibrationRun({ ...calibrationRun, session });
+      await refreshStatus();
+      await refreshDiagnosticLogs();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to capture calibration target');
+    }
+  }
+
+  async function completeCalibration() {
+    if (!calibrationRun.session) {
+      return;
+    }
+
+    try {
+      setError(null);
+      const complete = await requireGlanceBridge().completeCalibrationSession(calibrationRun.session.session_id);
+      if (complete.mode === 'initial-9-point') {
+        const validation = await requireGlanceBridge().createCalibrationSession({
+          mode: 'validation',
+          display_id: 'main',
+        });
+        setCalibrationRun({ phase: 'validation', session: validation, complete: null });
+        await refreshStatus();
+        await refreshDiagnosticLogs();
+        return;
+      }
+      setCalibrationRun({ phase: 'complete', session: null, complete });
+      setStatus(complete.status);
+      await refreshDiagnosticLogs();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to complete calibration');
+    }
+  }
+
+  async function runSyntheticCalibration() {
+    try {
+      setError(null);
+      await updateSettings({ debug: { synthetic_gaze_enabled: true } });
+      const initialComplete = await collectSyntheticCalibrationMode('initial-9-point', 'initial');
+      const validationComplete = await collectSyntheticCalibrationMode('validation', 'validation');
+      setCalibrationRun({ phase: 'complete', session: null, complete: validationComplete });
+      setStatus(validationComplete.status);
+      await refreshDiagnosticLogs();
+      if (initialComplete.profile_id !== null || !validationComplete.profile_id) {
+        throw new Error('Calibration did not produce a persisted profile');
+      }
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to complete debug calibration');
+    }
+  }
+
+  async function collectSyntheticCalibrationMode(
     mode: CalibrationMode,
     phase: CalibrationRunState['phase'],
   ) {
-    let session = await window.glance.createCalibrationSession({ mode, display_id: 'main' });
+    const glance = requireGlanceBridge();
+    let session = await glance.createCalibrationSession({ mode, display_id: 'main' });
     setCalibrationRun({ phase, session, complete: null });
 
     for (const target of session.targets) {
-      session = await window.glance.submitCalibrationSamples(session.session_id, {
+      session = await glance.submitCalibrationSamples(session.session_id, {
         target_id: target.id,
         samples: createSyntheticCalibrationSamples(target),
       });
       setCalibrationRun({ phase, session, complete: null });
     }
 
-    return window.glance.completeCalibrationSession(session.session_id);
+    return glance.completeCalibrationSession(session.session_id);
   }
 
   async function cancelCalibration() {
@@ -185,9 +340,10 @@ function App() {
     }
 
     try {
-      const cancelled = await window.glance.cancelCalibrationSession(calibrationRun.session.session_id);
+      const cancelled = await requireGlanceBridge().cancelCalibrationSession(calibrationRun.session.session_id);
       setStatus(cancelled.status);
       setCalibrationRun({ phase: 'cancelled', session: null, complete: null });
+      await refreshDiagnosticLogs();
       setError(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to cancel calibration');
@@ -227,7 +383,8 @@ function App() {
           </Card>
         </div>
 
-        <Card className="self-start lg:mt-4">
+        <div className="space-y-6 self-start lg:mt-4">
+        <Card>
           <CardHeader className="gap-3">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1.5">
@@ -264,6 +421,13 @@ function App() {
                 value={status?.ui.runtime_critical ? 'yes' : 'no'}
               />
             </div>
+
+            {status && hasDeniedHelperPermissions(status) ? (
+              <PermissionPanel
+                status={status}
+                onOpenPermissionSettings={openPermissionSettings}
+              />
+            ) : null}
 
             <Separator />
 
@@ -312,9 +476,30 @@ function App() {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button type="button" onClick={runSyntheticCalibration}>
+                <Button type="button" onClick={startCalibration}>
                   <CheckCircle2 />
                   Calibrate
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={captureCalibrationTarget}
+                  disabled={!calibrationRun.session}
+                >
+                  <Crosshair />
+                  Capture
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={completeCalibration}
+                  disabled={
+                    !calibrationRun.session
+                    || calibrationRun.session.current_target_index < calibrationRun.session.targets.length
+                  }
+                >
+                  <CheckCircle2 />
+                  Complete
                 </Button>
                 <Button
                   type="button"
@@ -324,6 +509,10 @@ function App() {
                 >
                   <Crosshair />
                   Drift
+                </Button>
+                <Button type="button" variant="outline" onClick={runSyntheticCalibration}>
+                  <SlidersHorizontal />
+                  Debug Synthetic
                 </Button>
                 <Button
                   type="button"
@@ -413,14 +602,160 @@ function App() {
               </p>
             ) : null}
 
-            <Button className="w-full" variant="destructive" type="button" onClick={() => window.glance.quitGlance()}>
+            <Button className="w-full" variant="destructive" type="button" onClick={() => {
+              try {
+                void requireGlanceBridge().recordDiagnosticLog({
+                  component: 'renderer',
+                  severity: 'info',
+                  message: 'Full runtime shutdown requested from UI',
+                });
+                void requireGlanceBridge().quitGlance();
+              } catch (nextError) {
+                setError(nextError instanceof Error ? nextError.message : 'Unable to quit Glance');
+              }
+            }}>
               <Power />
               Quit Glance
             </Button>
           </CardContent>
         </Card>
+        <Card>
+          <CardHeader className="gap-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1.5">
+                <CardTitle>Diagnostics</CardTitle>
+                <CardDescription>Privacy-preserving runtime logs from each component.</CardDescription>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={refreshDiagnosticLogs}
+                aria-label="Refresh diagnostics"
+              >
+                <RefreshCw />
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <label className="grid gap-2 text-sm">
+              <span className="flex items-center gap-2 font-medium">
+                <ListFilter className="size-4" />
+                Component
+              </span>
+              <select
+                className="h-10 border border-input bg-background px-3 text-sm"
+                value={diagnosticFilter}
+                onChange={(event) => {
+                  setDiagnosticFilter(event.target.value as DiagnosticComponent | 'all');
+                }}
+              >
+                <option value="all">All</option>
+                <option value="core">Core</option>
+                <option value="helper">Helper</option>
+                <option value="electron-main">Electron main</option>
+                <option value="renderer">Renderer</option>
+                <option value="camera">Camera</option>
+                <option value="calibration">Calibration</option>
+                <option value="tracking">Tracking</option>
+              </select>
+            </label>
+
+            <div className="max-h-72 space-y-2 overflow-auto border border-border bg-muted p-3 font-mono text-xs">
+              {diagnosticLogs.filter((entry) => (
+                diagnosticFilter === 'all' || entry.component === diagnosticFilter
+              )).length > 0 ? (
+                diagnosticLogs.filter((entry) => (
+                  diagnosticFilter === 'all' || entry.component === diagnosticFilter
+                )).map((entry) => (
+                  <div key={`${entry.timestamp_ms}-${entry.component}-${entry.message}`} className="grid gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="tabular-nums text-muted-foreground">
+                        {new Date(entry.timestamp_ms).toLocaleTimeString()}
+                      </span>
+                      <Badge variant="outline" className="uppercase">
+                        {entry.component}
+                      </Badge>
+                      <span className={severityClassName(entry.severity)}>{entry.severity}</span>
+                    </div>
+                    <p className="break-words text-foreground">{entry.message}</p>
+                  </div>
+                ))
+              ) : (
+                <p className="text-muted-foreground">No diagnostic logs</p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+        </div>
       </section>
     </main>
+  );
+}
+
+function severityClassName(severity: DiagnosticLogEntry['severity']) {
+  if (severity === 'error') {
+    return 'font-semibold text-destructive';
+  }
+  if (severity === 'warning') {
+    return 'font-semibold text-amber-700';
+  }
+  return 'font-semibold text-muted-foreground';
+}
+
+function hasDeniedHelperPermissions(status: CoreUiStatus) {
+  return status.helper.input.permissions.accessibility !== 'granted'
+    || status.helper.input.permissions.input_monitoring !== 'granted';
+}
+
+function PermissionPanel({
+  status,
+  onOpenPermissionSettings,
+}: {
+  status: CoreUiStatus;
+  onOpenPermissionSettings: (permission: HelperPermissionName) => Promise<void>;
+}) {
+  const permissions = status.helper.input.permissions;
+
+  return (
+    <div className="grid gap-3 border border-destructive/40 bg-destructive/10 p-3 text-sm">
+      <div className="font-medium text-destructive">macOS permissions required</div>
+      <PermissionAction
+        label="Accessibility"
+        value={permissions.accessibility}
+        onClick={() => onOpenPermissionSettings('accessibility')}
+      />
+      <PermissionAction
+        label="Input Monitoring"
+        value={permissions.input_monitoring}
+        onClick={() => onOpenPermissionSettings('input_monitoring')}
+      />
+    </div>
+  );
+}
+
+function PermissionAction({
+  label,
+  value,
+  onClick,
+}: {
+  label: string;
+  value: string;
+  onClick: () => Promise<void>;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-center gap-2">
+        <span>{label}</span>
+        <Badge variant="outline" className="capitalize">
+          {value}
+        </Badge>
+      </div>
+      <Button type="button" variant="outline" size="sm" onClick={() => { void onClick(); }}>
+        <ExternalLink />
+        Open
+      </Button>
+    </div>
   );
 }
 

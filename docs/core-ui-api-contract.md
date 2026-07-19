@@ -238,6 +238,12 @@ and validation metrics, never raw feature samples or image data. See
 [Calibration Flow and Data Model](calibration-flow-and-data-model.md) for the exact MVP 1 flow,
 profile schema, retry states, and privacy boundaries.
 
+### `POST /calibration/sessions/{session_id}/capture`
+
+Captures one target's privacy-preserving sample batch from the Core-owned camera path and advances
+the active calibration session. This is the normal camera-backed UI path. It returns the same
+session shape as `POST /calibration/sessions/{session_id}/samples`.
+
 ### `POST /calibration/sessions/{session_id}/complete`
 
 Requests Core to fit or validate the calibration and persist `calibration.json` when successful.
@@ -298,6 +304,49 @@ Electron it should exit.
 ```
 
 Closing Electron or pressing `Cmd+Q` is not a full runtime shutdown.
+
+### `GET /diagnostics/logs`
+
+Returns recent privacy-preserving technical log entries owned by Core. The optional `component`
+query parameter filters entries to one component. The optional `limit` query parameter is bounded
+to 1-500 entries.
+
+```json
+{
+  "contract_version": 1,
+  "entries": [
+    {
+      "timestamp_ms": 1721300000000,
+      "component": "core",
+      "severity": "info",
+      "message": "Core runtime started",
+      "details": { "port": 51234 }
+    }
+  ]
+}
+```
+
+Allowed components are `core`, `helper`, `electron-main`, `renderer`, `camera`, `calibration`,
+and `tracking`. Allowed severities are `debug`, `info`, `warning`, and `error`.
+
+Diagnostic logs are for troubleshooting only. They may include component names, severity,
+timestamps, process lifecycle events, request outcomes, failure codes, aggregate counts, and short
+error messages. They must not include camera frames, videos, raw landmarks, raw calibration sample
+batches, continuous gaze traces, observed Accessibility targets, raw key events, input history, or
+click history by default.
+
+### `POST /diagnostics/logs`
+
+Allows non-Core UI components to append a diagnostic log entry through the authenticated Core API.
+
+```json
+{
+  "component": "renderer",
+  "severity": "info",
+  "message": "Start tracking requested from UI",
+  "details": null
+}
+```
 
 ## WebSocket
 
