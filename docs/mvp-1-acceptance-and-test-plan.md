@@ -24,7 +24,7 @@ changing its architecture or MVP 1/MVP 2 boundary.
 | Settings persistence | Core owns `config.json`; Electron reads/writes settings only through the Core API; unknown settings are rejected; persisted settings affect synthetic/camera tracking, smoothing, confidence threshold, Space click, and pause behavior. | Automated Core API tests plus manual settings change pass. |
 | Calibration | UI drives initial 9-point calibration, validation, cancellation, and 1-point drift correction through Core sessions; Core persists one accepted `calibration.json` profile containing model/correction/validation data. | Automated Core calibration tests and UI synthetic calibration pass; manual real-camera calibration pass. |
 | Gaze mapping | Camera samples use the contracted feature and quality fields, map through persisted ridge regression, IDW 3x3 correction grid, smoothing, confidence classification, and emit Helper `gaze.sample` events. | Automated mapper/camera boundary tests plus manual camera stream pass. |
-| Real camera | With `debug.synthetic_gaze_enabled: false`, installed vision dependencies, and the pinned Face Landmarker model, Core uses the built-in webcam through OpenCV/MediaPipe and records privacy-preserving camera metrics. | Automated fake-camera tests plus mandatory manual hardware pass. |
+| Real camera | With the default `debug.synthetic_gaze_enabled: false`, installed vision dependencies, and the pinned Face Landmarker model, Core uses the built-in webcam through OpenCV/MediaPipe and records privacy-preserving camera metrics. | Automated fake-camera tests plus mandatory manual hardware pass. |
 | Cursor movement | After accepted calibration, real camera gaze visibly drives the Helper overlay cursor on the main display at an observed rate near the 30 FPS target, with low-confidence or invalid samples not moving the cursor. | Mandatory manual hardware pass using `/status.camera.metrics` and visible overlay behavior. |
 | Space click | Space tap posts one real left click at the latest overlay cursor point when tracking input is enabled, not paused, a cursor exists, and Accessibility permission is available; suppressed clicks are reported only as latest debug status. | Swift build and Core telemetry tests plus mandatory manual permissioned click pass. |
 | Esc pause | Esc is hold-to-pause; repeat key-down is ignored; release resumes the previous tracking state; fast recovery hides or freezes the overlay while keeping tracking warm, and privacy/low-power hides the overlay and releases camera work. | Core telemetry tests plus mandatory manual permissioned pause pass. |
@@ -77,7 +77,7 @@ through `GLANCE_FACE_LANDMARKER_MODEL_PATH`, and the needed macOS permissions av
 5. Reopen Electron and confirm it reconnects to the existing Core through the runtime files.
 6. Run the 9-point calibration and validation flow; confirm an accepted `calibration.json` profile
    is written and raw samples/images are not persisted.
-7. Disable synthetic gaze, start tracking, and grant camera permission if prompted.
+7. Confirm synthetic gaze is disabled, start tracking, and grant camera permission if prompted.
 8. Confirm `/status.camera.metrics` reports captured, inference, emitted, invalid, dropped, and FPS
    counters without exposing frames, landmarks, feature vectors, or gaze traces.
 9. Look at several screen regions and confirm the overlay cursor follows calibrated gaze on the

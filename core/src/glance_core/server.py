@@ -217,12 +217,12 @@ def create_app(
     def status_gaze_debug(*, synthetic_enabled: bool, calibrated: bool) -> GazeMappingDebug:
         gaze_running = tracking_state == "running" and synthetic_enabled and calibrated
         invalid_reason: GazeInvalidReason | None = None
-        if not synthetic_enabled:
-            invalid_reason = "synthetic-disabled"
-        elif not calibrated:
+        if not calibrated:
             invalid_reason = "uncalibrated"
         elif tracking_state != "running":
             invalid_reason = "paused" if tracking_state == "paused" else "tracking-stopped"
+        elif not synthetic_enabled:
+            invalid_reason = "synthetic-disabled"
         gaze_status = "valid" if gaze_running else "uncalibrated" if invalid_reason == "uncalibrated" else "paused"
 
         return GazeMappingDebug(

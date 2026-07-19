@@ -109,8 +109,9 @@ Useful environment variables:
 - `GLANCE_HELPER_COMMAND`: override the Helper command Core launches.
 - `GLANCE_FACE_LANDMARKER_MODEL_PATH`: set the real-camera MediaPipe model path.
 
-By default, synthetic gaze is enabled for development. Use the UI settings or Core settings API to
-set `debug.synthetic_gaze_enabled` to `false` when validating real camera tracking.
+By default, Glance uses real camera tracking. Synthetic gaze remains available as an optional
+debugging mode through the UI settings or Core settings API by setting
+`debug.synthetic_gaze_enabled` to `true`.
 
 ## Testing
 

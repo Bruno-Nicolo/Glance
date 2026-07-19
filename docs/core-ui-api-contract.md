@@ -60,7 +60,7 @@ Returns UI dashboard state. `ui.runtime_critical` is always `false` in MVP 1.
     "status": "uncalibrated",
     "confidence": 0.0,
     "sample_at_ms": null,
-    "source": "synthetic",
+    "source": "camera",
     "correction": "idw-3x3",
     "smoothing_alpha": 0.5,
     "confidence_threshold": 0.6,
@@ -92,7 +92,8 @@ It reports only the latest action, latest suppressed reason, whether Esc pause i
 and current permission state. It is not an input history and must not be persisted by default. See
 [Helper Input Behavior Contract](helper-input-behavior-contract.md).
 
-When real camera tracking is active, `camera.metrics` may report privacy-preserving aggregate
+Camera tracking is the default mode. When real camera tracking is active, `camera.metrics` may
+report privacy-preserving aggregate
 measurement counters:
 
 ```json
@@ -126,7 +127,7 @@ Returns Core-owned persisted settings from `config.json`.
     "smoothing": 0.5
   },
   "input": { "space_click_enabled": true },
-  "debug": { "synthetic_gaze_enabled": true }
+  "debug": { "synthetic_gaze_enabled": false }
 }
 ```
 

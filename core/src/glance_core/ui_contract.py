@@ -58,7 +58,7 @@ class InputSettings:
 
 @dataclass(frozen=True, kw_only=True)
 class DebugSettings:
-    synthetic_gaze_enabled: bool = True
+    synthetic_gaze_enabled: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -157,7 +157,7 @@ class CoreUiApiContractTests(unittest.TestCase):
                     "status": "uncalibrated",
                     "confidence": 0.0,
                     "sample_at_ms": None,
-                    "source": "synthetic",
+                    "source": "camera",
                     "correction": "idw-3x3",
                     "smoothing_alpha": 0.5,
                     "confidence_threshold": 0.6,
@@ -192,11 +192,11 @@ class CoreUiApiContractTests(unittest.TestCase):
 
         _status_code, status_body = self.get("/status")
         self.assertEqual(status_body["gaze"]["source"], "camera")
-        self.assertEqual(status_body["gaze"]["status"], "paused")
+        self.assertEqual(status_body["gaze"]["status"], "uncalibrated")
         self.assertEqual(status_body["gaze"]["confidence"], 0.0)
         self.assertEqual(status_body["gaze"]["confidence_threshold"], 0.74)
         self.assertEqual(status_body["gaze"]["smoothing_alpha"], 0.38)
-        self.assertEqual(status_body["gaze"]["invalid_reason"], "synthetic-disabled")
+        self.assertEqual(status_body["gaze"]["invalid_reason"], "uncalibrated")
 
     def test_settings_rejects_unknown_fields_with_structured_error(self) -> None:
         status_code, body = self.put("/settings", {"tracking": {"unknown": True}})
@@ -231,12 +231,14 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(started_status["tracking"]["input_enabled"], True)
         self.assertEqual(started_status["gaze"]["status"], "uncalibrated")
         self.assertEqual(started_status["gaze"]["confidence"], 0.0)
+        self.assertEqual(started_status["gaze"]["source"], "camera")
         self.assertEqual(stop_status, 200)
         self.assertEqual(stopped_status["tracking"]["state"], "stopped")
         self.assertEqual(stopped_status["tracking"]["input_enabled"], False)
         self.assertEqual(stopped_status["gaze"]["status"], "uncalibrated")
 
     def test_calibration_session_accepts_synthetic_samples_validates_and_persists_profile(self) -> None:
+        put_status, _put_body = self.put("/settings", {"debug": {"synthetic_gaze_enabled": True}})
         initial = self.create_and_collect_calibration_session("initial-9-point")
 
         self.assertEqual([target["id"] for target in initial["targets"]], [
@@ -287,6 +289,7 @@ class CoreUiApiContractTests(unittest.TestCase):
         self.assertEqual(drifted["drift_corrections"], 1)
 
         start_status, started = self.post("/controls/start")
+        self.assertEqual(put_status, 200)
         self.assertEqual(start_status, 200)
         self.assertEqual(started["gaze"]["status"], "valid")
         self.assertEqual(started["gaze"]["confidence"], 1.0)
@@ -435,7 +438,6 @@ class CoreUiApiContractTests(unittest.TestCase):
         validation_complete_status, _validation_complete = self.post(
             f"/calibration/sessions/{validation['session_id']}/complete"
         )
-        put_status, _put_body = self.put("/settings", {"debug": {"synthetic_gaze_enabled": False}})
         start_status, _start_body = self.post("/controls/start")
 
         async def receive_camera_sample() -> tuple[dict, dict, dict]:
@@ -454,7 +456,6 @@ class CoreUiApiContractTests(unittest.TestCase):
 
         self.assertEqual(initial_complete_status, 200)
         self.assertEqual(validation_complete_status, 200)
-        self.assertEqual(put_status, 200)
         self.assertEqual(start_status, 200)
         self.assertEqual(ready["type"], "core.ready")
         self.assertEqual(tracking["reason"], "camera-startup")
@@ -573,7 +574,6 @@ class CoreUiApiContractTests(unittest.TestCase):
         put_status, _put_body = self.put(
             "/settings",
             {
-                "debug": {"synthetic_gaze_enabled": False},
                 "tracking": {"pause_behavior": "privacy-low-power"},
             },
         )
